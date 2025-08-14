@@ -158,7 +158,8 @@ def invert_mapping(numbers: np.ndarray) -> Dict[int, int]:
     return inv
 
 def path_join(*parts):
-    return "/".join([p.strip("/")] + [q.strip("/") for q in parts[1:]])
+    """Join HDF5-style paths (no leading/trailing //)."""
+    return "/".join([parts[0].strip("/") ] + [q.strip("/") for q in parts[1:]])
 
 def line_fig(x, series: dict, x_label: str, y_label: str, use_gl: bool = True):
     fig = go.Figure()
