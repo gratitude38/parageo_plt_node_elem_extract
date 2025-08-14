@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import h5py
 import streamlit as st
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 import zipfile
 
 # -------------------------
@@ -38,7 +38,6 @@ def parse_int_list(user_text: str) -> List[int]:
     Parse list like: "1,2,5-10, 15"
     Returns a sorted list of unique integers.
     """
-    import re
     s = user_text.strip()
     if not s:
         return []
@@ -78,7 +77,6 @@ def list_groups(h: h5py.Group) -> List[str]:
 
 def match_key(keys: List[str], patterns: List[str]) -> Optional[str]:
     """Return the first key that matches any of the regex patterns (case-insensitive, full match)."""
-    import re
     for pat in patterns:
         for k in keys:
             if re.fullmatch(pat, k, flags=re.IGNORECASE):
@@ -89,7 +87,6 @@ def extract_step_from_filename(name: str) -> Optional[int]:
     """
     Expect *_NNN.ext at the end OR ...StepXX_NNN.ext -> extract trailing NNN.
     """
-    import re
     m = re.search(r"_(\d{1,})\.[^.]+$", name)
     if m:
         try:
@@ -102,7 +99,6 @@ def get_dump_group(f: h5py.File, preferred_step: Optional[int]) -> Optional[str]
     """
     Find Dump_XXX group. Prefer the one matching preferred_step; otherwise return the only Dump_* group or the first one.
     """
-    import re
     dumps = [k for k in f.keys() if k.startswith("Dump_")]
     if not dumps:
         return None
@@ -164,6 +160,19 @@ def invert_mapping(numbers: np.ndarray) -> Dict[int, int]:
 def path_join(*parts):
     return "/".join([p.strip("/")] + [q.strip("/") for q in parts[1:]])
 
+def line_fig(x, series: dict, x_label: str, y_label: str, use_gl: bool = True):
+    fig = go.Figure()
+    for name, y in series.items():
+        Trace = go.Scattergl if use_gl else go.Scatter
+        fig.add_trace(Trace(x=x, y=y, mode="lines+markers", name=name))
+    fig.update_layout(
+        hovermode="x unified",
+        margin=dict(l=40, r=10, t=30, b=40),
+        xaxis_title=x_label,
+        yaxis_title=y_label,
+    )
+    return fig
+
 # -------------------------
 # App State
 # -------------------------
@@ -175,8 +184,8 @@ if "files_meta" not in st.session_state:
 if "active_step_index" not in st.session_state:
     st.session_state.active_step_index = 0
 
-st.title("HDF5-Structured FEM Viewer")
-st.caption("Drag & drop multiple `.plt` files (each is a time step). Explore Dump / Equations / Materials, extract nodal/element variables, and compare across time.")
+st.title("HDF5-Structured FEM Viewer (Plotly)")
+st.caption("Drag & drop multiple `.plt` files (each is a time step). Explore Dump / Equations / Materials, extract nodal/element variables, build cross-time overlays, and export bundles.")
 
 # -------------------------
 # File Uploader (Drag & Drop)
@@ -211,7 +220,6 @@ if uploads:
                         internal_step = None
                 step = suffix_step if suffix_step is not None else internal_step
                 if step is None and dump_group:
-                    import re
                     m = re.match(r"Dump_(\d+)$", dump_group)
                     step = int(m.group(1)) if m else None
         except Exception as e:
@@ -503,13 +511,20 @@ if st.session_state.get("show_dump"):
                                 st.subheader("Preview")
                                 st.dataframe(df, use_container_width=True)
 
-                                fig = plt.figure()
-                                ax = fig.add_subplot(111)
-                                ax.plot(df[f"{mode}_number"], df["value"], marker="o")
-                                ax.set_xlabel(f"{mode} number")
-                                ax.set_ylabel(var if comp_index is None else f"{var} [comp {comp_index}]")
-                                ax.grid(True, alpha=0.3)
-                                st.pyplot(fig, clear_figure=True)
+                                fig = line_fig(
+                                    x=df[f"{mode}_number"],
+                                    series={var if comp_index is None else f"{var} [comp {comp_index}]": df["value"]},
+                                    x_label=f"{mode} number",
+                                    y_label=var if comp_index is None else f"{var} [comp {comp_index}]",
+                                    use_gl=True,
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
+                                st.download_button(
+                                    "Download plot (HTML)",
+                                    fig.to_html(include_plotlyjs="cdn").encode("utf-8"),
+                                    file_name="plot.html",
+                                    mime="text/html",
+                                )
 
                                 st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"), file_name=f"{fault}_{mode.lower()}_{var}.csv", mime="text/csv")
 
@@ -585,13 +600,20 @@ if st.session_state.get("show_dump"):
                                 st.subheader("Preview")
                                 st.dataframe(df, use_container_width=True)
 
-                                fig = plt.figure()
-                                ax = fig.add_subplot(111)
-                                ax.plot(df[f"{mode}_number"], df["value"], marker="o")
-                                ax.set_xlabel(f"{mode} number")
-                                ax.set_ylabel(var if comp_index is None else f"{var} [comp {comp_index}]")
-                                ax.grid(True, alpha=0.3)
-                                st.pyplot(fig, clear_figure=True)
+                                fig = line_fig(
+                                    x=df[f"{mode}_number"],
+                                    series={var if comp_index is None else f"{var} [comp {comp_index}]": df["value"]},
+                                    x_label=f"{mode} number",
+                                    y_label=var if comp_index is None else f"{var} [comp {comp_index}]",
+                                    use_gl=True,
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
+                                st.download_button(
+                                    "Download plot (HTML)",
+                                    fig.to_html(include_plotlyjs="cdn").encode("utf-8"),
+                                    file_name="plot.html",
+                                    mime="text/html",
+                                )
 
                                 st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"), file_name=f"{group_name}_{mode.lower()}_{var}.csv", mime="text/csv")
 
@@ -609,32 +631,9 @@ if st.session_state.get("show_dump"):
                 st.subheader("Cross-Time Overlays")
                 overlay_scope = st.radio("Data source", ["Contact faults", "Group results"], horizontal=True)
 
-                # Helper: overview for cross-time
-                def build_overview(files_meta):
-                    overview = {"steps": [], "times": {}, "contact_names": set(), "group_results_names": set()}
-                    for step in sorted(files_meta.keys()):
-                        path = files_meta[step]["path"]
-                        try:
-                            with h5py.File(path, "r") as ff:
-                                dg = get_dump_group(ff, step)
-                                if not dg:
-                                    continue
-                                t = float(np.array(ff[dg]["Time"][()]).item()) if "Time" in ff[dg] else None
-                                overview["steps"].append(step)
-                                overview["times"][step] = t
-                                if "Contact" in ff[dg]:
-                                    overview["contact_names"].update(list_groups(ff[dg]["Contact"]))
-                                if "group_results" in ff[dg]:
-                                    overview["group_results_names"].update(list_groups(ff[dg]["group_results"]))
-                        except Exception:
-                            continue
-                    return overview
-
-                ov = build_overview(st.session_state.files_meta)
-
                 if overlay_scope == "Contact faults":
                     # Choose fault from union over steps
-                    all_faults = sorted(ov["contact_names"])
+                    all_faults = sorted(overview["contact_names"])
                     if not all_faults:
                         st.info("No Contact faults found across the loaded files.")
                     else:
@@ -656,7 +655,7 @@ if st.session_state.get("show_dump"):
                         if st.button("Build overlay", key="ct_over_build"):
                             rows = []
                             missing_steps = []
-                            for step in ov["steps"]:
+                            for step in overview["steps"]:
                                 fmeta = st.session_state.files_meta.get(step)
                                 if not fmeta: 
                                     continue
@@ -693,22 +692,25 @@ if st.session_state.get("show_dump"):
                                 df = pd.DataFrame(rows).sort_values("step")
                                 st.dataframe(df, use_container_width=True)
                                 # Plot overlay: one line per entity_number
-                                fig = plt.figure()
-                                ax = fig.add_subplot(111)
+                                x_col = "time" if x_axis == "Time" else "step"
+                                fig = go.Figure()
                                 for n, sub in df.groupby("entity_number"):
-                                    ax.plot(sub["time"] if x_axis == "Time" else sub["step"], sub["value"], marker="o", label=f"{mode} {n}")
-                                ax.set_xlabel(x_axis)
-                                ax.set_ylabel(var if base_vars else "value")
-                                ax.grid(True, alpha=0.3)
-                                ax.legend()
-                                st.pyplot(fig, clear_figure=True)
+                                    fig.add_trace(go.Scattergl(x=sub[x_col], y=sub["value"], mode="lines+markers", name=f"{mode} {n}"))
+                                fig.update_layout(hovermode="x unified", xaxis_title=x_axis, yaxis_title=var, margin=dict(l=40, r=10, t=30, b=40))
+                                st.plotly_chart(fig, use_container_width=True)
+                                st.download_button(
+                                    "Download overlay (HTML)",
+                                    fig.to_html(include_plotlyjs="cdn").encode("utf-8"),
+                                    file_name="overlay.html",
+                                    mime="text/html",
+                                )
                                 st.download_button("Download overlay CSV", df.to_csv(index=False).encode("utf-8"), file_name=f"overlay_contact_{fault_sel}_{mode.lower()}_{var}.csv", mime="text/csv")
                                 if missing_steps:
                                     st.caption(f"Skipped steps without data: {sorted(set(missing_steps))}")
 
                 else:
                     # Group results
-                    all_groups = sorted(ov["group_results_names"])
+                    all_groups = sorted(overview["group_results_names"])
                     if not all_groups:
                         st.info("No group_results groups found across the loaded files.")
                     else:
@@ -730,7 +732,7 @@ if st.session_state.get("show_dump"):
                         if st.button("Build overlay", key="ct_over_build_gr"):
                             rows = []
                             missing_steps = []
-                            for step in ov["steps"]:
+                            for step in overview["steps"]:
                                 fmeta = st.session_state.files_meta.get(step)
                                 if not fmeta: 
                                     continue
@@ -766,15 +768,18 @@ if st.session_state.get("show_dump"):
                             else:
                                 df = pd.DataFrame(rows).sort_values("step")
                                 st.dataframe(df, use_container_width=True)
-                                fig = plt.figure()
-                                ax = fig.add_subplot(111)
+                                fig = go.Figure()
+                                x_col = "time" if x_axis == "Time" else "step"
                                 for n, sub in df.groupby("entity_number"):
-                                    ax.plot(sub["time"] if x_axis == "Time" else sub["step"], sub["value"], marker="o", label=f"{mode} {n}")
-                                ax.set_xlabel(x_axis)
-                                ax.set_ylabel(var if base_vars else "value")
-                                ax.grid(True, alpha=0.3)
-                                ax.legend()
-                                st.pyplot(fig, clear_figure=True)
+                                    fig.add_trace(go.Scattergl(x=sub[x_col], y=sub["value"], mode="lines+markers", name=f"{mode} {n}"))
+                                fig.update_layout(hovermode="x unified", xaxis_title=x_axis, yaxis_title=var, margin=dict(l=40, r=10, t=30, b=40))
+                                st.plotly_chart(fig, use_container_width=True)
+                                st.download_button(
+                                    "Download overlay (HTML)",
+                                    fig.to_html(include_plotlyjs="cdn").encode("utf-8"),
+                                    file_name="overlay.html",
+                                    mime="text/html",
+                                )
                                 st.download_button("Download overlay CSV", df.to_csv(index=False).encode("utf-8"), file_name=f"overlay_group_{group_sel}_{mode.lower()}_{var}.csv", mime="text/csv")
                                 if missing_steps:
                                     st.caption(f"Skipped steps without data: {sorted(set(missing_steps))}")
@@ -783,44 +788,23 @@ if st.session_state.get("show_dump"):
                 st.subheader("Export Bundles (ZIP)")
                 st.caption("Bundle one or more variables across selected time steps into CSV files (one CSV per variable).")
 
-                # Build overview one more time for choices
-                def build_overview_simple(files_meta):
-                    overview = {"steps": []}
-                    for step in sorted(files_meta.keys()):
-                        overview["steps"].append(step)
-                    return overview
-                ov2 = build_overview_simple(st.session_state.files_meta)
-                steps_choice = st.multiselect("Select steps", ov2["steps"], default=ov2["steps"], key="bundle_steps")
-
+                steps_choice = st.multiselect("Select steps", overview["steps"], default=overview["steps"], key="bundle_steps")
                 exp_scope = st.radio("Bundle source", ["Contact faults", "Group results"], horizontal=True, key="bundle_scope")
 
                 if exp_scope == "Contact faults":
-                    # Fault selection
-                    # Collect union of all faults
-                    faults_union = set()
-                    for step in ov2["steps"]:
-                        path = st.session_state.files_meta[step]["path"]
-                        try:
-                            with h5py.File(path, "r") as ff:
-                                dg = get_dump_group(ff, step)
-                                if dg and "Contact" in ff[dg]:
-                                    faults_union.update(list_groups(ff[dg]["Contact"]))
-                        except Exception:
-                            continue
-                    faults = sorted(faults_union)
-                    if not faults:
+                    all_faults = sorted(overview["contact_names"])
+                    if not all_faults:
                         st.info("No Contact faults found across the loaded files.")
                     else:
-                        fault_sel_b = st.selectbox("Fault", faults, key="bundle_fault")
+                        fault_sel_b = st.selectbox("Fault", all_faults, key="bundle_fault")
                         mode_b = st.radio("Variable type", ["Nodal", "Element"], horizontal=True, key="bundle_mode_contact")
                         # Variables list from active step if possible
-                        vars_list = []
                         try:
                             fg = dump_g["Contact"][fault_sel_b]
                             ctx_act = classify_in_group(fg, is_contact=True)
                             vars_list = ctx_act["nodal_vars"] if mode_b == "Nodal" else ctx_act["elem_vars"]
                         except Exception:
-                            pass
+                            vars_list = []
                         vars_pick = st.multiselect("Variables to export", vars_list, key="bundle_vars_contact")
                         comp_index_b = st.number_input("Component index (column, if applicable)", min_value=0, value=0, step=1, key="bundle_comp_contact")
                         id_text_b = st.text_input(f"Enter {mode_b.lower()} NUMBERS (not IDs)", value="", placeholder="e.g., 1,2,3-10", key="bundle_ids_contact")
@@ -866,30 +850,19 @@ if st.session_state.get("show_dump"):
 
                 else:
                     # group_results
-                    groups_union = set()
-                    for step in ov2["steps"]:
-                        path = st.session_state.files_meta[step]["path"]
-                        try:
-                            with h5py.File(path, "r") as ff:
-                                dg = get_dump_group(ff, step)
-                                if dg and "group_results" in ff[dg]:
-                                    groups_union.update(list_groups(ff[dg]["group_results"]))
-                        except Exception:
-                            continue
-                    groups = sorted(groups_union)
-                    if not groups:
+                    all_groups = sorted(overview["group_results_names"])
+                    if not all_groups:
                         st.info("No group_results groups found across the loaded files.")
                     else:
-                        group_sel_b = st.selectbox("Group", groups, key="bundle_group")
+                        group_sel_b = st.selectbox("Group", all_groups, key="bundle_group")
                         mode_b = st.radio("Variable type", ["Nodal", "Element"], horizontal=True, key="bundle_mode_gr")
                         # Variables list from active step
-                        vars_list = []
                         try:
                             gg = dump_g["group_results"][group_sel_b]
                             ctx_act = classify_in_group(gg, is_contact=False)
                             vars_list = ctx_act["nodal_vars"] if mode_b == "Nodal" else ctx_act["elem_vars"]
                         except Exception:
-                            pass
+                            vars_list = []
                         vars_pick = st.multiselect("Variables to export", vars_list, key="bundle_vars_gr")
                         comp_index_b = st.number_input("Component index (column, if applicable)", min_value=0, value=0, step=1, key="bundle_comp_gr")
                         id_text_b = st.text_input(f"Enter {mode_b.lower()} NUMBERS (not IDs)", value="", placeholder="e.g., 1,2,3-10", key="bundle_ids_gr")

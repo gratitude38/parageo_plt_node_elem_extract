@@ -1,6 +1,5 @@
 streamlit
+h5py
 numpy
 pandas
-h5py
-matplotlib
-zipfile
+plotly
