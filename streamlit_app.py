@@ -485,12 +485,12 @@ def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
                 st.sidebar.info("Dump group has no containers.")
                 return False
 
-            # Preference chain: per-file -> global_last -> last_container_name -> last_container_any -> CI match -> first
+            # Preference chain: GLOBAL last first → per-file → other carriers → CI → first
             per_file_key = f"container_for::{active_id}"
             global_key   = "global_last_container"
             candidates = [
-                st.session_state.get(per_file_key),
                 st.session_state.get(global_key),
+                st.session_state.get(per_file_key),
                 st.session_state.get("last_container_name"),
                 st.session_state.get("last_container_any"),
             ]
@@ -524,8 +524,8 @@ def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
             global_sub_key   = f"global_last_subgroup::{selected_container}"
             last_sub_any_key = f"last_sub_any::{selected_container}"
             candidates_sub = [
-                st.session_state.get(per_file_sub_key),
                 st.session_state.get(global_sub_key),
+                st.session_state.get(per_file_sub_key),
                 st.session_state.get("last_subgroup_name"),
                 st.session_state.get(last_sub_any_key),
             ]
