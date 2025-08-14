@@ -1,4 +1,5 @@
 
+
 import io
 import os
 import re
@@ -13,6 +14,34 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # =========================
+# App config
+# =========================
+st.set_page_config(page_title="HDF5 .plt Viewer (FEM, Plotly)", layout="wide")
+
+# =========================
+# Session init
+# =========================
+if "files" not in st.session_state:
+    # list of entries: {"id": str, "name": str, "path": str, "step": int|None, "dump_group": str|None, "time": float|None}
+    st.session_state.files = []
+if "active_index" not in st.session_state:
+    st.session_state.active_index = 0
+if "flash_msg" not in st.session_state:
+    st.session_state.flash_msg = None
+
+# Persistent UI selections
+for k, v in {
+    "part_choice": "Dump",
+    "dump_container": None,
+    "dump_subgroup": None,
+    "dump_mode": "Nodal",
+    "dump_vars": [],
+    "dump_numbers": "",
+    "dump_secondary": "None",
+}.items():
+    st.session_state.setdefault(k, v)
+
+# =========================
 # Helpers
 # =========================
 
@@ -23,14 +52,6 @@ def bytes_to_str(x):
         except Exception:
             return str(x)
     return x
-
-def decode_array(arr: np.ndarray) -> np.ndarray:
-    if isinstance(arr, np.ndarray) and (arr.dtype.kind in ["S", "O"]):
-        try:
-            return np.vectorize(bytes_to_str)(arr)
-        except Exception:
-            return arr.astype(str)
-    return arr
 
 def parse_int_list(user_text: str) -> List[int]:
     s = user_text.strip()
@@ -54,29 +75,8 @@ def parse_int_list(user_text: str) -> List[int]:
                 continue
     return sorted(nums)
 
-def list_groups(h: h5py.Group) -> List[str]:
-    return [k for k, v in h.items() if isinstance(v, h5py.Group)]
-
-def list_datasets(h: h5py.Group) -> List[str]:
-    return [k for k, v in h.items() if isinstance(v, h5py.Dataset)]
-
-def match_key(keys: List[str], patterns: List[str]) -> Optional[str]:
-    for pat in patterns:
-        for k in keys:
-            if re.fullmatch(pat, k, flags=re.IGNORECASE):
-                return k
-    return None
-
-def extract_step_from_filename(name: str) -> Optional[int]:
-    m = re.search(r"_(\d{1,})\.[^.]+$", name)
-    if m:
-        try:
-            return int(m.group(1))
-        except Exception:
-            pass
-    return None
-
 def get_dump_group(f: h5py.File, preferred_step: Optional[int]) -> Optional[str]:
+    """Return Dump_XXX group; prefer preferred_step when present."""
     dumps = [k for k in f.keys() if k.startswith("Dump_")]
     if not dumps:
         return None
@@ -93,6 +93,18 @@ def get_dump_group(f: h5py.File, preferred_step: Optional[int]) -> Optional[str]
     steps.sort()
     return steps[-1][1]
 
+def extract_step_from_filename(name: str) -> Optional[int]:
+    m = re.search(r"_(\d{1,})\.[^.]+$", name)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            pass
+    return None
+
+def list_groups(h: h5py.Group) -> List[str]:
+    return [k for k, v in h.items() if isinstance(v, h5py.Group)]
+
 def path_join(*parts):
     return "/".join([parts[0].strip("/")] + [q.strip("/") for q in parts[1:]])
 
@@ -106,37 +118,48 @@ def invert_mapping(numbers: np.ndarray) -> Dict[int, int]:
             pass
     return inv
 
-def classify_variables(g: h5py.Group, node_count: int, elem_count: int, exclude_keys: List[str]) -> Tuple[List[str], List[str]]:
+def find_mapping_keys(g: h5py.Group, container_name: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Return (topology_key, node_map_key, elem_map_key) with rules:
+       - If container is 'Contact' (case-insensitive), use 'Contact Node number' & 'Contact Element number'
+       - Else, use 'Node Numbers' & 'Element Numbers'.
+       Topology is optional.
+    """
+    keys = list(g.keys())
+    topo_key = "Topology" if "Topology" in keys else None
+    node_key = None
+    elem_key = None
+    if container_name.lower() == "contact":
+        if "Contact Node number" in keys: node_key = "Contact Node number"
+        if "Contact Element number" in keys: elem_key = "Contact Element number"
+    else:
+        if "Node Numbers" in keys: node_key = "Node Numbers"
+        if "Element Numbers" in keys: elem_key = "Element Numbers"
+    # mild fallback: case-insensitive
+    if node_key is None:
+        for k in keys:
+            if re.fullmatch(r"(?i)contact\s*node\s*number", k) and container_name.lower()=="contact":
+                node_key = k; break
+            if re.fullmatch(r"(?i)node\s*numbers", k) and container_name.lower()!="contact":
+                node_key = k; break
+    if elem_key is None:
+        for k in keys:
+            if re.fullmatch(r"(?i)contact\s*element\s*number", k) and container_name.lower()=="contact":
+                elem_key = k; break
+            if re.fullmatch(r"(?i)element\s*numbers", k) and container_name.lower()!="contact":
+                elem_key = k; break
+    return topo_key, node_key, elem_key
+
+def classify_variables(g: h5py.Group, node_count: int, elem_count: int, exclude: List[str]) -> Tuple[List[str], List[str]]:
     nodal, elem = [], []
     for k, v in g.items():
-        if not isinstance(v, h5py.Dataset):
-            continue
-        if k in exclude_keys:
-            continue
-        # numeric-ish only
-        if v.dtype.kind not in ("i", "u", "f"):
-            try:
-                np.array(v[()], dtype=float)
-            except Exception:
-                continue
+        if not isinstance(v, h5py.Dataset): continue
+        if k in exclude: continue
         shape = v.shape
-        if len(shape) == 0:
-            continue
+        if len(shape)==0: continue
         n0 = shape[0]
-        if n0 == node_count:
-            nodal.append(k)
-        elif n0 == elem_count:
-            elem.append(k)
+        if n0 == node_count: nodal.append(k)
+        elif n0 == elem_count: elem.append(k)
     return sorted(nodal), sorted(elem)
-
-def get_dump_subgroups(f: h5py.File, dump_group: Optional[str]) -> List[str]:
-    if not dump_group or dump_group not in f:
-        return []
-    return [k for k, v in f[dump_group].items() if isinstance(v, h5py.Group)]
-
-# =========================
-# Plot style (FT-like)
-# =========================
 
 def ft_style(fig: go.Figure, x_title: str, y_title_left: str, y_title_right: Optional[str] = None):
     fig.update_layout(
@@ -156,369 +179,368 @@ def ft_style(fig: go.Figure, x_title: str, y_title_left: str, y_title_right: Opt
         fig.update_yaxes(title_text=y_title_right, secondary_y=True)
 
 # =========================
-# App layout/state
+# File analysis
 # =========================
 
-st.set_page_config(page_title="HDF5 .plt Viewer (Plotly, Minimal)", layout="wide")
+def analyze_file(dst_path: str, orig_name: str) -> Dict[str, Any]:
+    suffix_step = extract_step_from_filename(orig_name)
+    dump_group = None
+    tval = None
+    step_val = suffix_step
+    try:
+        with h5py.File(dst_path, "r") as f:
+            dump_group = get_dump_group(f, suffix_step)
+            if dump_group and "Time" in f[dump_group]:
+                try:
+                    tval = float(np.array(f[dump_group]["Time"][()]).item())
+                except Exception:
+                    tval = None
+            if dump_group and "Step" in f[dump_group]:
+                try:
+                    step_val = int(np.array(f[dump_group]["Step"][()]).item())
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return {"name": orig_name, "path": dst_path, "step": step_val, "dump_group": dump_group, "time": tval}
 
-if "files_meta" not in st.session_state:
-    st.session_state.files_meta = {}  # step -> {"name": str, "path": str}
-if "active_step_index" not in st.session_state:
-    st.session_state.active_step_index = 0
+# =========================
+# Sidebar: uploader + part toggle
+# =========================
 
-# Sidebar uploader
 with st.sidebar:
     st.header("Data")
     uploads = st.file_uploader(
         "Drop `.plt` files",
         type=["plt", "h5", "hdf5"],
         accept_multiple_files=True,
-        help="Each file is one time step; suffix like `_002.plt` orders steps.",
+        help="Each file is one time step; filename suffix like `_002.plt` is used for ordering.",
         key="uploader",
     )
 
     if uploads:
-        new_meta = {}
+        added_ids = []
         for uf in uploads:
-            # Persist upload to a temp file (always new path)
             tmpdir = tempfile.mkdtemp(prefix="plt_")
             dst = os.path.join(tmpdir, uf.name)
             with open(dst, "wb") as out:
-                out.write(uf.read())  # robust across hosts
+                out.write(uf.read())
+            meta = analyze_file(dst, uf.name)
 
-            # Determine step
-            suffix_step = extract_step_from_filename(uf.name)
-            try:
-                with h5py.File(dst, "r") as f:
-                    dump_group = get_dump_group(f, suffix_step)
-                    internal_step = None
-                    if dump_group and "Step" in f[dump_group]:
-                        try:
-                            internal_step = int(np.array(f[dump_group]["Step"][()]).item())
-                        except Exception:
-                            internal_step = None
-                    step = suffix_step if suffix_step is not None else internal_step
-                    if step is None and dump_group:
-                        m = re.match(r"Dump_(\d+)$", dump_group)
-                        step = int(m.group(1)) if m else None
-            except Exception as e:
-                st.error(f"Failed to read {uf.name} as HDF5: {e}")
-                continue
+            # Build a unique id; allow duplicates even if same step and same filename (suffix later)
+            base_id = f"{meta['step'] or 'NA'}::{meta['name']}"
+            unique_id = base_id
+            i = 1
+            existing_ids = {e["id"] for e in st.session_state.files}
+            while unique_id in existing_ids:
+                i += 1
+                unique_id = f"{base_id} ({i})"
+            meta["id"] = unique_id
+            st.session_state.files.append(meta)
+            added_ids.append(unique_id)
 
-            if step is None:
-                step = max(st.session_state.files_meta.keys(), default=-1) + 1
+        st.session_state.flash_msg = f"Files loaded: {added_ids}"
+        st.rerun()
 
-            # Ensure unique key
-            base_step = step
-            while step in st.session_state.files_meta or step in new_meta:
-                step += 1
-
-            new_meta[step] = {"name": uf.name, "path": dst}
-
-        if new_meta:
-            st.session_state.files_meta.update(new_meta)
-            st.success(f"Loaded steps: {sorted(new_meta.keys())}")
+    # flash after rerun
+    if st.session_state.flash_msg:
+        st.success(st.session_state.flash_msg)
+        st.session_state.flash_msg = None
 
     st.divider()
     st.header("View")
-    part_choice = st.radio("Available parts", ["Dump", "Equations", "Materials"], index=0, help="Only one section shown at a time.")
+    st.session_state.part_choice = st.radio(
+        "Available parts",
+        ["Dump", "Equations", "Materials"],
+        index=0,
+        help="Only one section shown at a time.",
+        key="part_choice_radio",
+    )
 
-# If nothing loaded, show guidance
-if not st.session_state.files_meta:
-    st.info("No files loaded yet. Use the sidebar to drop one or more `.plt` files.")
+# Guard if nothing loaded
+if not st.session_state.files:
+    st.info("No files loaded yet. Use the sidebar to drop `.plt` files.")
     st.stop()
 
-# Step nav
-steps_sorted = sorted(st.session_state.files_meta.keys())
-cols = st.columns([1,1,3,1,1])
+# Sort files by (step, name) for navigation
+def sort_key(entry):
+    s = entry["step"]
+    return (999999 if s is None else int(s), entry["name"])
+
+files_sorted = sorted(st.session_state.files, key=sort_key)
+
+# Ensure active_index is within range
+st.session_state.active_index = min(max(0, st.session_state.active_index), len(files_sorted)-1)
+active = files_sorted[st.session_state.active_index]
+
+# =========================
+# Top bar: step/file navigation
+# =========================
+
+cols = st.columns([1,1,4,2,1])
 with cols[0]:
-    if st.button("◀ Prev", use_container_width=True, disabled=st.session_state.active_step_index <= 0):
-        st.session_state.active_step_index = max(0, st.session_state.active_step_index - 1)
+    if st.button("◀ Prev", use_container_width=True, disabled=st.session_state.active_index <= 0):
+        st.session_state.active_index = max(0, st.session_state.active_index - 1)
 with cols[1]:
-    if st.button("Next ▶", use_container_width=True, disabled=st.session_state.active_step_index >= len(steps_sorted)-1):
-        st.session_state.active_step_index = min(len(steps_sorted)-1, st.session_state.active_step_index + 1)
+    if st.button("Next ▶", use_container_width=True, disabled=st.session_state.active_index >= len(files_sorted)-1):
+        st.session_state.active_index = min(len(files_sorted)-1, st.session_state.active_index + 1)
 with cols[2]:
-    active_step = steps_sorted[st.session_state.active_step_index]
-    st.markdown(f"### Active time step: **{active_step}**")
+    label = f"Step {active['step'] if active['step'] is not None else 'NA'} — {active['name']}"
+    st.markdown(f"### {label}")
 with cols[3]:
-    selected_step = st.selectbox("Jump to step", steps_sorted, index=st.session_state.active_step_index, key="jump")
-    if selected_step != active_step:
-        st.session_state.active_step_index = steps_sorted.index(selected_step)
-        active_step = selected_step
+    # drop-down of all files
+    labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']} ({e['id']})" for e in files_sorted]
+    sel = st.selectbox("Jump to file", options=list(range(len(files_sorted))), format_func=lambda i: labels[i], index=st.session_state.active_index, key="jump_file")
+    if sel != st.session_state.active_index:
+        st.session_state.active_index = sel
 with cols[4]:
     if st.button("Clear files", help="Forget uploaded files"):
-        st.session_state.files_meta = {}
-        st.session_state.active_step_index = 0
-        st.cache_data.clear()
-        st.experimental_set_query_params()  # clear URL state
-        st.toast("Cleared files")
+        st.session_state.files = []
+        st.session_state.active_index = 0
+        st.rerun()
 
-meta = st.session_state.files_meta[active_step]
-st.caption(f"File: {meta['name']}")
-
-# Summary (uncached to avoid stale state while debugging)
-def summarize_file(path: str, preferred_step: Optional[int]) -> Dict[str, Any]:
-    info = {"path": path, "preferred_step": preferred_step}
-    with h5py.File(path, "r") as f:
-        top_keys = list(f.keys())
-        info["top_keys"] = top_keys
-        dump_group = get_dump_group(f, preferred_step)
-        info["dump_group"] = dump_group
-
-        time = None; step = None; reset = None
-        if dump_group and dump_group in f:
-            g = f[dump_group]
-            time = float(np.array(g["Time"][()]).item()) if "Time" in g else None
-            step = int(np.array(g["Step"][()]).item()) if "Step" in g else preferred_step
-            reset = int(np.array(g["Reset_time_stage"][()]).item()) if "Reset_time_stage" in g else None
-        info["time"] = time; info["step"] = step; info["reset_time_stage"] = reset
-
-        info["has_equations"] = "Equations" in f
-        info["has_materials"] = "Materials" in f
-        info["dump_subgroups"] = get_dump_subgroups(f, dump_group)
-
-        # For quick sanity
-        if dump_group and dump_group in f:
-            info["dump_keys"] = list(f[dump_group].keys())
-        else:
-            info["dump_keys"] = []
-    return info
-
-try:
-    summary = summarize_file(meta["path"], active_step)
-except Exception as e:
-    st.error(f"Failed to summarize file: {e}")
-    summary = {"dump_group": None, "has_equations": False, "has_materials": False, "dump_subgroups": [], "top_keys": []}
-
-# Diagnostics strip
-with st.expander("Status & Debug", expanded=False):
-    st.write({
-        "loaded_steps": steps_sorted,
-        "active_step": active_step,
-        "file_exists": os.path.exists(meta["path"]),
-        "top_keys": summary.get("top_keys"),
-        "dump_group": summary.get("dump_group"),
-        "dump_subgroups": summary.get("dump_subgroups"),
-        "dump_keys": summary.get("dump_keys"),
-        "has_equations": summary.get("has_equations"),
-        "has_materials": summary.get("has_materials"),
-        "time": summary.get("time"),
-        "step": summary.get("step"),
-        "reset": summary.get("reset_time_stage"),
-    })
-
-# Validate chosen part
-if part_choice == "Equations" and not summary["has_equations"]:
-    st.warning("No 'Equations' in this file. Showing Dump instead.")
-    part_choice = "Dump"
-if part_choice == "Materials" and not summary["has_materials"]:
-    st.warning("No 'Materials' in this file. Showing Dump instead.")
-    part_choice = "Dump"
-if part_choice == "Dump" and not summary["dump_group"]:
-    st.warning("No 'Dump_*' group found in this file. Check 'Status & Debug' to inspect top-level keys.")
-    st.stop()
+st.caption(f"Dump group: {active.get('dump_group')} | Time: {active.get('time')} | File: {active.get('name')}")
 
 # =========================
-# Equations (two-pane)
+# Equations (side-by-side, scalars only)
 # =========================
 
-def render_equations(path: str):
-    with h5py.File(path, "r") as f:
-        g = f["Equations"]
-        items = list(g.keys())
-        if not items:
-            st.info("No items under 'Equations'.")
-            return
-        c1, c2 = st.columns([1,2])
-        with c1:
-            sel = st.selectbox("Items", items, key="eq_item")
-        with c2:
+def render_equations(entry: Dict[str, Any]):
+    path = entry["path"]
+    try:
+        with h5py.File(path, "r") as f:
+            if "Equations" not in f:
+                st.info("No 'Equations' group in this file."); return
+            g = f["Equations"]
+            items = list(g.keys())
+            if not items:
+                st.info("No items under 'Equations'."); return
+            c1, c2 = st.columns([1,2])
+            with c1:
+                sel = st.selectbox("Items", items, key="eq_item")
+            with c2:
+                obj = g[sel]
+                rows = []
+                if isinstance(obj, h5py.Group):
+                    for k, v in obj.items():
+                        if isinstance(v, h5py.Dataset):
+                            data = v[()]
+                            if np.isscalar(data) or (isinstance(data, np.ndarray) and data.size == 1):
+                                val = data.item() if np.isscalar(data) else np.array(data).flatten()[0]
+                                rows.append({"name": k, "value": bytes_to_str(val)})
+                else:
+                    data = obj[()]
+                    if np.isscalar(data) or (isinstance(data, np.ndarray) and data.size == 1):
+                        val = data.item() if np.isscalar(data) else np.array(data).flatten()[0]
+                        rows.append({"name": sel, "value": bytes_to_str(val)})
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                else:
+                    st.info("No scalar values in this selection.")
+    except Exception as e:
+        st.error(f"Equations read error: {e}")
+
+# =========================
+# Materials (three columns; scalars only)
+# =========================
+
+def render_materials(entry: Dict[str, Any]):
+    path = entry["path"]
+    try:
+        with h5py.File(path, "r") as f:
+            if "Materials" not in f:
+                st.info("No 'Materials' group in this file."); return
+            g = f["Materials"]
+            items = list(g.keys())
+            if not items:
+                st.info("No items under 'Materials'."); return
+            c1, c2, c3 = st.columns([1,1,1.6])
+            with c1:
+                sel = st.selectbox("Items", items, key="mat_item")
+            names, values = [], []
             obj = g[sel]
-            records = []
             if isinstance(obj, h5py.Group):
                 for k, v in obj.items():
                     if isinstance(v, h5py.Dataset):
                         data = v[()]
                         if np.isscalar(data) or (isinstance(data, np.ndarray) and data.size == 1):
                             val = data.item() if np.isscalar(data) else np.array(data).flatten()[0]
-                            records.append({"name": k, "value": bytes_to_str(val)})
+                            names.append(k); values.append(bytes_to_str(val))
             else:
                 data = obj[()]
-                if np.isscalar(data):
-                    records.append({"name": sel, "value": bytes_to_str(data.item())})
-                elif isinstance(data, np.ndarray) and data.size == 1:
-                    records.append({"name": sel, "value": bytes_to_str(np.array(data).flatten()[0])})
-            if records:
-                st.dataframe(pd.DataFrame(records), use_container_width=True, hide_index=True)
-            else:
-                st.info("No scalar values found for this selection.")
+                if np.isscalar(data) or (isinstance(data, np.ndarray) and data.size == 1):
+                    val = data.item() if np.isscalar(data) else np.array(data).flatten()[0]
+                    names.append(sel); values.append(bytes_to_str(val))
+            with c2:
+                st.write("**Names**")
+                st.dataframe(pd.DataFrame({"name": names}), hide_index=True, use_container_width=True)
+            with c3:
+                st.write("**Values**")
+                st.dataframe(pd.DataFrame({"value": values}), hide_index=True, use_container_width=True)
+    except Exception as e:
+        st.error(f"Materials read error: {e}")
 
 # =========================
-# Materials (three-pane)
+# Dump (two-level containers -> subgroups)
 # =========================
 
-def render_materials(path: str):
-    with h5py.File(path, "r") as f:
-        g = f["Materials"]
-        items = list(g.keys())
-        if not items:
-            st.info("No items under 'Materials'.")
-            return
-        c1, c2, c3 = st.columns([1,1,1.6])
-        with c1:
-            sel = st.selectbox("Items", items, key="mat_item")
-        names, values = [], []
-        obj = g[sel]
-        if isinstance(obj, h5py.Group):
-            for k, v in obj.items():
-                if isinstance(v, h5py.Dataset):
-                    data = v[()]
-                    if np.isscalar(data) or (isinstance(data, np.ndarray) and data.size == 1):
-                        val = data.item() if np.isscalar(data) else np.array(data).flatten()[0]
-                        names.append(k); values.append(bytes_to_str(val))
-        else:
-            data = obj[()]
-            if np.isscalar(data):
-                names.append(sel); values.append(bytes_to_str(data.item()))
-            elif isinstance(data, np.ndarray) and data.size == 1:
-                names.append(sel); values.append(bytes_to_str(np.array(data).flatten()[0]))
-        with c2:
-            st.write("**Names**")
-            st.dataframe(pd.DataFrame({"name": names}), hide_index=True, use_container_width=True)
-        with c3:
-            st.write("**Values**")
-            st.dataframe(pd.DataFrame({"value": values}), hide_index=True, use_container_width=True)
+def render_dump(entry: Dict[str, Any]):
+    path = entry["path"]
+    dump_group = entry["dump_group"]
+    if not dump_group:
+        st.info("This file has no Dump_* group."); return
+    try:
+        with h5py.File(path, "r") as f:
+            root = f[dump_group]
+            containers = [k for k, v in root.items() if isinstance(v, h5py.Group)]
+            if not containers:
+                st.info("Dump group has no containers."); return
 
-# =========================
-# Dump (generic)
-# =========================
+            # Container select (remember prior selection)
+            if st.session_state.dump_container not in containers:
+                st.session_state.dump_container = containers[0]
+            container = st.selectbox("Container", containers, index=containers.index(st.session_state.dump_container), key="dump_container_select")
+            st.session_state.dump_container = container
 
-def get_mappings_for_group(g: h5py.Group) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    keys = list(g.keys())
-    topo_key = match_key(keys, [r"Topology"])
-    node_map_key = match_key(keys, [r"Contact\s*Node\s*number", r"Node\s*Numbers", r"Node\s*numbers"])
-    elem_map_key = match_key(keys, [r"Contact\s*Element\s*number", r"Element\s*Numbers", r"Element\s*numbers"])
-    return topo_key, node_map_key, elem_map_key
+            # Subgroup select
+            subgroups = list_groups(root[container])
+            if not subgroups:
+                st.info("Selected container has no subgroups."); return
+            if st.session_state.dump_subgroup not in subgroups:
+                st.session_state.dump_subgroup = subgroups[0]
+            subgroup = st.selectbox("Subgroup", subgroups, index=subgroups.index(st.session_state.dump_subgroup), key="dump_subgroup_select")
+            st.session_state.dump_subgroup = subgroup
 
-def classify_in_group(g: h5py.Group):
-    topo_key, node_map_key, elem_map_key = get_mappings_for_group(g)
-    # Require node/element maps at minimum
-    if not (node_map_key and elem_map_key):
-        return None, {"available_keys": list(g.keys())}
-    node_numbers = np.array(g[node_map_key]).astype(int).reshape(-1)
-    elem_numbers = np.array(g[elem_map_key]).astype(int).reshape(-1)
-    node_inv = invert_mapping(node_numbers)
-    elem_inv = invert_mapping(elem_numbers)
-    # Topology optional now
-    num_nodes = node_numbers.shape[0]
-    num_elems = elem_numbers.shape[0]
-    exclude = [k for k in [topo_key, node_map_key, elem_map_key] if k]
-    nodal_vars, elem_vars = classify_variables(g, num_nodes, num_elems, exclude)
-    return {
-        "node_inv": node_inv, "elem_inv": elem_inv,
-        "num_nodes": num_nodes, "num_elems": num_elems,
-        "nodal_vars": nodal_vars, "elem_vars": elem_vars
-    }, None
+            g = root[container][subgroup]
 
-def render_dump(path: str, dump_group: str, dump_subgroups: List[str]):
-    with h5py.File(path, "r") as f:
-        if not dump_subgroups:
-            st.info("No subgroups under Dump. See 'Status & Debug' for keys.")
-            return
-        group_name = st.selectbox("Group inside Dump", dump_subgroups, key="dump_group_choice")
-        g = f[path_join(dump_group, group_name)]
-        ctx, err = classify_in_group(g)
-        if not ctx:
-            st.error("Could not locate 'Node Numbers' / 'Element Numbers' in this group.")
-            if err and "available_keys" in err:
-                with st.expander("Available keys in group"):
-                    st.write(err["available_keys"])
-            return
+            # Mapping keys based on container
+            topo_key, node_key, elem_key = find_mapping_keys(g, container_name=container)
+            if not (node_key and elem_key):
+                st.error("Required mapping datasets not found (Node/Element Numbers)."); return
+            node_numbers = np.array(g[node_key]).astype(int).reshape(-1)
+            elem_numbers = np.array(g[elem_key]).astype(int).reshape(-1)
+            node_inv = invert_mapping(node_numbers)
+            elem_inv = invert_mapping(elem_numbers)
 
-        mode = st.radio("Variable type", ["Nodal", "Element"], horizontal=True, key="dump_var_type")
-        var_options = ctx["nodal_vars"] if mode == "Nodal" else ctx["elem_vars"]
+            # Mode (explicit)
+            mode = st.radio("Variable type", ["Nodal", "Element"], horizontal=True, index=0 if st.session_state.dump_mode=="Nodal" else 1, key="dump_mode_radio")
+            st.session_state.dump_mode = mode
+            num_nodes, num_elems = node_numbers.shape[0], elem_numbers.shape[0]
 
-        if not var_options:
-            st.info(f"No {mode.lower()} variables detected here.")
-            return
+            # Classify variables
+            exclude = [k for k in [topo_key, node_key, elem_key] if k]
+            nodal_vars, elem_vars = classify_variables(g, node_count=num_nodes, elem_count=num_elems, exclude=exclude)
+            var_options = nodal_vars if mode=="Nodal" else elem_vars
+            if not var_options:
+                st.info(f"No {mode.lower()} variables detected in this subgroup."); return
 
-        vars_pick = st.multiselect("Variables to plot/table", var_options, key="dump_vars_pick")
+            # Variables to plot (remember selection)
+            default_vars = [v for v in st.session_state.dump_vars if v in var_options]
+            vars_pick = st.multiselect("Variables", var_options, default=default_vars, key="dump_vars_select")
+            st.session_state.dump_vars = vars_pick
 
-        numbers_text = st.text_input(f"Enter {mode.lower()} NUMBERS (not IDs)", placeholder="e.g., 1,2,3-10", key="dump_numbers")
-        numbers_list = parse_int_list(numbers_text)
-
-        sec_choice = None
-        if len(vars_pick) >= 2:
-            sec_choice = st.selectbox("Secondary y-axis (optional)", ["None"] + vars_pick, index=0, key="dump_secondary")
-            if sec_choice == "None":
-                sec_choice = None
-
-        if not vars_pick or not numbers_list:
-            st.info("Select one or more variables and enter a list of numbers to plot/table.")
-            return
-
-        inv = ctx["node_inv"] if mode == "Nodal" else ctx["elem_inv"]
-        ids = [inv.get(n) for n in numbers_list]
-        missing = [n for n, i in zip(numbers_list, ids) if i is None]
-        ids = [i for i in ids if i is not None]
-        if missing:
-            st.warning(f"Numbers not found and skipped: {missing}")
-
-        data = {"entity_number": [n for n, i in zip(numbers_list, ids + [None]*(len(numbers_list)-len(ids))) if i is not None]}
-        for var in vars_pick:
-            arr = np.array(g[var])
-            # Use first component if vector
-            if arr.ndim == 1:
-                vals = [arr[i] if i is not None and i < arr.shape[0] else np.nan for i in ids]
-            else:
-                vals = [arr[i, 0] if i is not None and i < arr.shape[0] else np.nan for i in ids]
-            vals = [float(np.array(v).item()) if not (isinstance(v, float) and np.isnan(v)) else np.nan for v in vals]
-            data[var] = vals
-
-        df = pd.DataFrame(data)
-
-        # Plot
-        if sec_choice:
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            # Per-variable component selectors
+            var_components = {}
             for var in vars_pick:
-                if var == sec_choice:
-                    continue
-                fig.add_trace(go.Scattergl(x=df["entity_number"], y=df[var], mode="lines+markers", name=var), secondary_y=False)
-            fig.add_trace(go.Scattergl(x=df["entity_number"], y=df[sec_choice], mode="lines+markers", name=f"{sec_choice} (right)"), secondary_y=True)
-            ft_style(fig, x_title=f"{mode} number", y_title_left="Primary", y_title_right="Secondary")
-        else:
-            fig = go.Figure()
+                arr = np.array(g[var])
+                comp_max = arr.shape[1]-1 if (arr.ndim >= 2) else 0
+                if comp_max > 0:
+                    key = f"comp::{container}::{subgroup}::{var}"
+                    comp_default = st.session_state.get(key, 0)
+                    comp_idx = st.number_input(f"{var} • component", min_value=0, max_value=comp_max, value=min(comp_default, comp_max), step=1, key=key)
+                    var_components[var] = int(comp_idx)
+                    st.session_state[key] = int(comp_idx)
+                else:
+                    var_components[var] = None
+
+            # Numbers input (remember)
+            numbers_default = st.session_state.dump_numbers
+            numbers_text = st.text_input(f"Enter {mode.lower()} NUMBERS (not IDs)", value=numbers_default, placeholder="e.g., 1,2,3-10", key="dump_numbers_input")
+            st.session_state.dump_numbers = numbers_text
+            numbers_list = parse_int_list(numbers_text)
+
+            # Secondary Y selection
+            sec_options = ["None"] + vars_pick
+            sec_default = st.session_state.dump_secondary if st.session_state.dump_secondary in sec_options else "None"
+            sec_choice = st.selectbox("Secondary y-axis (optional)", sec_options, index=sec_options.index(sec_default), key="dump_secondary_select")
+            st.session_state.dump_secondary = sec_choice
+
+            if not vars_pick or not numbers_list:
+                st.info("Choose at least one variable and enter a list of numbers to plot.")
+                return
+
+            # Map actual numbers -> internal IDs
+            inv = node_inv if mode=="Nodal" else elem_inv
+            ids = [inv.get(n) for n in numbers_list]
+            missing = [n for n, i in zip(numbers_list, ids) if i is None]
+            ids = [i for i in ids if i is not None]
+            used_numbers = [n for n in numbers_list if inv.get(n) is not None]
+            if missing:
+                st.warning(f"Numbers not found and dropped: {missing}")
+
+            # Build DataFrame with columns: entity_number + each var (label with component if present)
+            df = pd.DataFrame({"entity_number": used_numbers})
             for var in vars_pick:
-                fig.add_trace(go.Scattergl(x=df["entity_number"], y=df[var], mode="lines+markers", name=var))
-            ft_style(fig, x_title=f"{mode} number", y_title_left="Value")
+                arr = np.array(g[var])
+                if arr.ndim == 1:
+                    vals = [arr[i] if i is not None and i < arr.shape[0] else np.nan for i in ids]
+                    label = var
+                else:
+                    comp = var_components[var] or 0
+                    vals = [arr[i, comp] if i is not None and i < arr.shape[0] else np.nan for i in ids]
+                    label = f"{var} [comp {comp}]"
+                # coerce to float for plotting/table
+                vals = [float(np.array(v).item()) if (isinstance(v, (np.generic,)) or np.isscalar(v)) else float(v) for v in vals]
+                df[label] = vals
 
-        st.plotly_chart(fig, use_container_width=True)
+            # Plot
+            if sec_choice != "None":
+                # Map sec label (consider comp suffix)
+                sec_label = None
+                for col in df.columns[1:]:
+                    if col.startswith(sec_choice):
+                        sec_label = col; break
+                fig = make_subplots(specs=[[{"secondary_y": True}]])
+                for col in df.columns[1:]:
+                    if col == sec_label:
+                        continue
+                    fig.add_trace(go.Scattergl(x=df["entity_number"], y=df[col], mode="lines+markers", name=col), secondary_y=False)
+                if sec_label is not None:
+                    fig.add_trace(go.Scattergl(x=df["entity_number"], y=df[sec_label], mode="lines+markers", name=f"{sec_label} (right)"), secondary_y=True)
+                ft_style(fig, x_title=f"{mode} number", y_title_left="Primary", y_title_right="Secondary")
+            else:
+                fig = go.Figure()
+                for col in df.columns[1:]:
+                    fig.add_trace(go.Scattergl(x=df["entity_number"], y=df[col], mode="lines+markers", name=col))
+                ft_style(fig, x_title=f"{mode} number", y_title_left="Value")
 
-        # Table
-        st.dataframe(df, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Exports
+            html_bytes = fig.to_html(include_plotlyjs="cdn").encode("utf-8")
+            st.download_button("Download plot (HTML)", data=html_bytes, file_name="plot.html", mime="text/html")
+            try:
+                png_bytes = fig.to_image(format="png", scale=2)  # requires kaleido
+                st.download_button("Download plot (PNG)", data=png_bytes, file_name="plot.png", mime="image/png")
+            except Exception as e:
+                st.caption("PNG export unavailable (kaleido not installed in this runtime).")
+
+            # Table
+            st.dataframe(df, use_container_width=True)
+            # CSV export for table (kept as a convenience)
+            st.download_button("Download table (CSV)", data=df.to_csv(index=False).encode("utf-8"), file_name="table.csv", mime="text/csv")
+
+    except Exception as e:
+        st.error(f"Dump read error: {e}")
 
 # =========================
-# Render part
+# Render chosen part
 # =========================
 
-# Quick status banner
-with st.container(border=True):
-    st.write(f"**Loaded steps:** {steps_sorted} | **Active:** {active_step} | **Dump group:** {summary.get('dump_group')} | **Subgroups:** {summary.get('dump_subgroups')}")
-
-if part_choice == "Equations":
-    if summary["has_equations"]:
-        render_equations(meta["path"])
-    else:
-        st.info("This file has no 'Equations' group.")
-elif part_choice == "Materials":
-    if summary["has_materials"]:
-        render_materials(meta["path"])
-    else:
-        st.info("This file has no 'Materials' group.")
+if st.session_state.part_choice == "Equations":
+    render_equations(active)
+elif st.session_state.part_choice == "Materials":
+    render_materials(active)
 else:
-    if summary["dump_group"] and summary["dump_subgroups"]:
-        render_dump(meta["path"], summary["dump_group"], summary["dump_subgroups"])
-    elif summary["dump_group"] and not summary["dump_subgroups"]:
-        st.info("Found a Dump_* group but it contains no child groups. See 'Status & Debug'.")
-    else:
-        st.info("No Dump_* group found. Check 'Status & Debug' for top-level keys.")
+    render_dump(active)
+
