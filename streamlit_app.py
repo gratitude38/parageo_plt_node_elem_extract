@@ -295,7 +295,7 @@ def summarize_file(path: str, preferred_step: Optional[int]) -> Dict[str, Any]:
         info["has_materials"] = "Materials" in f
         info["dump_subgroups"] = get_dump_subgroups(f, dump_group) if dump_group else []
         info["equations_items"] = list(f["Equations"].keys()) if "Equations" in f else []
-        info["materials_items"] = list(f["Materials"].keys"]) if "Materials" in f else []
+        info["materials_items"] = list(f["Materials"].keys()) if "Materials" in f else []
     return info
 
 summary = summarize_file(meta["path"], active_step)
