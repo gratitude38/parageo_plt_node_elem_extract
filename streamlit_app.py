@@ -1,4 +1,3 @@
-
 import io
 import os
 import re
@@ -25,8 +24,7 @@ if "upload_key" not in st.session_state:
 if "active_id" not in st.session_state:
     st.session_state.active_id = None
 if "files" not in st.session_state:
-    # entries: {"id": str, "name": str, "path": str, "step": int|None, "dump_group": str|None, "time": float|None}
-    st.session_state.files = []
+    st.session_state.files = []  # entries: {"id","name","path","step","dump_group","time"}
 if "active_index" not in st.session_state:
     st.session_state.active_index = 0
 if "flash_msg" not in st.session_state:
@@ -108,9 +106,6 @@ def extract_step_from_filename(name: str) -> Optional[int]:
 def list_groups(h: h5py.Group) -> List[str]:
     return [k for k, v in h.items() if isinstance(v, h5py.Group)]
 
-def path_join(*parts):
-    return "/".join([parts[0].strip("/")] + [q.strip("/") for q in parts[1:]])
-
 def invert_mapping(numbers: np.ndarray) -> Dict[int, int]:
     inv = {}
     flat = np.array(numbers).reshape(-1).tolist()
@@ -124,8 +119,8 @@ def invert_mapping(numbers: np.ndarray) -> Dict[int, int]:
 def find_mapping_keys(g: h5py.Group, container_name: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Return (topology_key, node_map_key, elem_map_key).
        - If container is 'Contact' (case-insensitive): 'Contact Node number' & 'Contact Element number'
-       - Else: 'Node Numbers' & 'Element Numbers'
-       Topology is optional.
+       - Else: 'Node Numbers' & 'Element Numbers'.
+       Topology is optional (unused).
     """
     keys = list(g.keys())
     topo_key = "Topology" if "Topology" in keys else None
@@ -179,8 +174,10 @@ def ft_style(fig: go.Figure, x_title: str, y_title_left: str, y_title_right: Opt
     axis_color = "#262a33"
     fig.update_xaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=x_title)
     if y_title_right is None:
+        # Single y-axis
         fig.update_yaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=y_title_left)
     else:
+        # Dual y-axis (make_subplots required)
         fig.update_yaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=y_title_left, secondary_y=False)
         fig.update_yaxes(title_text=y_title_right, secondary_y=True)
 
@@ -257,6 +254,20 @@ with st.sidebar:
         st.success(st.session_state.flash_msg)
         st.session_state.flash_msg = None
 
+    # Manage sources (remove individually)
+    if st.session_state.files:
+        st.subheader("Sources")
+        for i, e in enumerate(st.session_state.files):
+            lbl = f"[{e.get('step','NA')}] {e.get('name')}"
+            cols = st.columns([1,0.2])
+            cols[0].markdown(lbl)
+            if cols[1].button("✕", key=f"del_{e['id']}", help="Remove this file"):
+                # remove and adjust selection
+                st.session_state.files = [x for x in st.session_state.files if x["id"] != e["id"]]
+                if st.session_state.active_id == e["id"]:
+                    st.session_state.active_id = None
+                st.rerun()
+
     st.divider()
     st.header("View")
     st.session_state.part_choice = st.radio(
@@ -295,12 +306,12 @@ active = files_sorted[st.session_state.active_index]
 
 cols = st.columns([1,1,4,2,1])
 with cols[0]:
-    if st.button("◀ Prev", use_container_width=True, disabled=st.session_state.active_index <= 0):
+    if st.button("◀ Prev", use_container_width=True, disabled=st.session_state.active_index <= 0, key="prev_btn"):
         st.session_state.active_index = max(0, st.session_state.active_index - 1)
         st.session_state.active_id = files_sorted[st.session_state.active_index].get("id")
         st.rerun()
 with cols[1]:
-    if st.button("Next ▶", use_container_width=True, disabled=st.session_state.active_index >= len(files_sorted)-1):
+    if st.button("Next ▶", use_container_width=True, disabled=st.session_state.active_index >= len(files_sorted)-1, key="next_btn"):
         st.session_state.active_index = min(len(files_sorted)-1, st.session_state.active_index + 1)
         st.session_state.active_id = files_sorted[st.session_state.active_index].get("id")
         st.rerun()
@@ -313,41 +324,16 @@ with cols[3]:
     if sel != st.session_state.active_index:
         st.session_state.active_index = sel
         st.session_state.active_id = files_sorted[sel].get("id")
+        st.rerun()
 with cols[4]:
-    if st.button("🗑 Remove current file", help="Remove the selected file"):
-        try:
-            del st.session_state.files[st.session_state.active_index]
-        except Exception:
-            pass
-        if st.session_state.files:
-            st.session_state.active_index = min(st.session_state.active_index, len(st.session_state.files)-1)
-            st.session_state.active_id = st.session_state.files[st.session_state.active_index].get("id")
-        else:
-            st.session_state.active_index = 0
-            st.session_state.active_id = None
+    if st.button("Clear all", help="Forget all uploaded files"):
+        st.session_state.files = []
+        st.session_state.active_index = 0
+        st.session_state.active_id = None
+        st.session_state.upload_key += 1
         st.rerun()
 
 st.caption(f"Dump group: {active.get('dump_group')} | Time: {active.get('time')} | File: {active.get('name')}")
-
-# Sidebar selectors for Dump (container/subgroup)
-if st.session_state.part_choice == "Dump" and active.get("dump_group"):
-    try:
-        with h5py.File(active["path"], "r") as _f:
-            _root = _f[active["dump_group"]]
-            _containers = [k for k, v in _root.items() if isinstance(v, h5py.Group)]
-            if _containers:
-                if st.session_state.dump_container not in _containers:
-                    st.session_state.dump_container = _containers[0]
-                with st.sidebar:
-                    st.subheader("Dump selection")
-                    st.session_state.dump_container = st.selectbox("Container", _containers, index=_containers.index(st.session_state.dump_container), key="dump_container_select")
-                    _subs = [k for k, v in _root[st.session_state.dump_container].items() if isinstance(v, h5py.Group)]
-                    if _subs:
-                        if st.session_state.dump_subgroup not in _subs:
-                            st.session_state.dump_subgroup = _subs[0]
-                        st.session_state.dump_subgroup = st.selectbox("Subgroup", _subs, index=_subs.index(st.session_state.dump_subgroup), key="dump_subgroup_select")
-    except Exception as _e:
-        st.sidebar.error(f"Dump navigation error: {_e}")
 
 # =========================
 # Equations (side-by-side, scalars only)
@@ -429,90 +415,115 @@ def render_materials(entry: Dict[str, Any]):
         st.error(f"Materials read error: {e}")
 
 # =========================
-# Dump (two-level containers -> subgroups)
+# Dump (container/subgroup in sidebar; plotting in main pane)
 # =========================
 
-def render_dump(entry: Dict[str, Any]):
+def render_dump_sidebar(entry: Dict[str, Any]):
+    """Render Container/Subgroup in the sidebar and store selections."""
+    path = entry["path"]
+    dump_group = entry["dump_group"]
+    with h5py.File(path, "r") as f:
+        if not dump_group or dump_group not in f:
+            st.sidebar.info("This file has no Dump_* group.")
+            return False
+        root = f[dump_group]
+        containers = [k for k, v in root.items() if isinstance(v, h5py.Group)]
+        if not containers:
+            st.sidebar.info("Dump group has no containers.")
+            return False
+
+        if st.session_state.dump_container not in containers:
+            st.session_state.dump_container = containers[0]
+        st.sidebar.selectbox("Container", containers, index=containers.index(st.session_state.dump_container), key="dump_container_select_sidebar")
+
+        subgroups = list_groups(root[st.session_state.dump_container])
+        if not subgroups:
+            st.sidebar.info("Selected container has no subgroups.")
+            return False
+        if st.session_state.dump_subgroup not in subgroups:
+            st.session_state.dump_subgroup = subgroups[0]
+        st.sidebar.selectbox("Subgroup", subgroups, index=subgroups.index(st.session_state.dump_subgroup), key="dump_subgroup_select_sidebar")
+
+    return True
+
+def render_dump_main(entry: Dict[str, Any]):
     path = entry["path"]
     dump_group = entry["dump_group"]
     if not dump_group:
-        st.info("This file has no Dump_* group."); return
+        st.info("This file has no Dump_* group.")
+        return
     try:
         with h5py.File(path, "r") as f:
             root = f[dump_group]
-            containers = [k for k, v in root.items() if isinstance(v, h5py.Group)]
-            if not containers:
-                st.info("Dump group has no containers."); return
-
-            # Use selection from sidebar
-            if st.session_state.dump_container not in containers:
-                st.info("Dump has no recognized containers."); return
             container = st.session_state.dump_container
-            subgroups = list_groups(root[container])
-            if not subgroups or st.session_state.dump_subgroup not in subgroups:
-                st.info("Selected container has no recognized subgroups."); return
             subgroup = st.session_state.dump_subgroup
+            if container is None or subgroup is None or container not in root or subgroup not in root[container]:
+                st.info("Pick a Container and Subgroup in the sidebar.")
+                return
             g = root[container][subgroup]
 
             # Mapping keys based on container
             topo_key, node_key, elem_key = find_mapping_keys(g, container_name=container)
             if not (node_key and elem_key):
-                st.error("Required mapping datasets not found (Node/Element Numbers)."); return
+                st.error("Required mapping datasets not found (Node/Element Numbers).")
+                return
             node_numbers = np.array(g[node_key]).astype(int).reshape(-1)
             elem_numbers = np.array(g[elem_key]).astype(int).reshape(-1)
             node_inv = invert_mapping(node_numbers)
             elem_inv = invert_mapping(elem_numbers)
 
-            # Mode (explicit)
+            # Controls row (variables + numbers + secondary)
             mode = st.radio("Variable type", ["Nodal", "Element"], horizontal=True, index=0 if st.session_state.dump_mode=="Nodal" else 1, key="dump_mode_radio")
             st.session_state.dump_mode = mode
             num_nodes, num_elems = node_numbers.shape[0], elem_numbers.shape[0]
-
-            # Classify variables
             exclude = [k for k in [topo_key, node_key, elem_key] if k]
             nodal_vars, elem_vars = classify_variables(g, node_count=num_nodes, elem_count=num_elems, exclude=exclude)
             var_options = nodal_vars if mode=="Nodal" else elem_vars
-            if not var_options:
-                st.info(f"No {mode.lower()} variables detected in this subgroup."); return
 
-            # Side-by-side inputs: Variables, Numbers, Secondary axis
-            c_vars, c_nums, c_sec = st.columns([2, 1.2, 1])
+            c_vars, c_nums, c_sec = st.columns([2,2,1])
             with c_vars:
                 default_vars = [v for v in st.session_state.dump_vars if v in var_options]
                 vars_pick = st.multiselect("Variables", var_options, default=default_vars, key="dump_vars_select")
                 st.session_state.dump_vars = vars_pick
             with c_nums:
+                label_numbers = "Enter nodal NUMBERS (not IDs)" if mode=="Nodal" else "Enter element NUMBERS (not IDs)"
                 numbers_default = st.session_state.dump_numbers
-                numbers_text = st.text_input(f"Enter {mode.lower()} NUMBERS (not IDs)", value=numbers_default, placeholder="e.g., 1,2,3-10", key="dump_numbers_input")
+                numbers_text = st.text_input(label_numbers, value=numbers_default, placeholder="e.g., 1,2,3-10", key="dump_numbers_input")
                 st.session_state.dump_numbers = numbers_text
                 numbers_list = parse_int_list(numbers_text)
             with c_sec:
                 sec_options = ["None"] + vars_pick
                 sec_default = st.session_state.dump_secondary if st.session_state.dump_secondary in sec_options else "None"
-                sec_choice = st.selectbox("Secondary y-axis (optional)", sec_options, index=sec_options.index(sec_default), key="dump_secondary_select")
+                sec_choice = st.selectbox("Secondary y-axis", sec_options, index=sec_options.index(sec_default), key="dump_secondary_select")
                 st.session_state.dump_secondary = sec_choice
-
-            # Per-variable component selectors below
-            var_components = {}
-            for var in vars_pick:
-                arr = np.array(g[var])
-                comp_max = arr.shape[1]-1 if (arr.ndim >= 2) else 0
-                if comp_max > 0:
-                    key = f"comp::{container}::{subgroup}::{var}"
-                    comp_default = int(st.session_state.get(key, 0))
-                    comp_default = max(0, min(comp_default, comp_max))
-                    try:
-                        comp_idx = st.number_input(f"{var} • component", min_value=0, max_value=comp_max, value=comp_default, step=1, key=key)
-                    except Exception:
-                        key = key + "::v2"
-                        comp_idx = st.number_input(f"{var} • component", min_value=0, max_value=comp_max, value=comp_default, step=1, key=key)
-                    var_components[var] = int(comp_idx)
-                else:
-                    var_components[var] = None
 
             if not vars_pick or not numbers_list:
                 st.info("Choose at least one variable and enter a list of numbers to plot.")
                 return
+
+            # Per-variable component selectors just below variables (if any vector vars)
+            vec_vars = []
+            for var in vars_pick:
+                arr = np.array(g[var])
+                if arr.ndim >= 2 and arr.shape[1] > 1:
+                    vec_vars.append((var, arr.shape[1]-1))
+            if vec_vars:
+                st.markdown("**Components**")
+                comp_cols = st.columns(len(vec_vars))
+                var_components = {}
+                for (var, comp_max), col in zip(vec_vars, comp_cols):
+                    with col:
+                        key = f"comp::{container}::{subgroup}::{var}"
+                        comp_default = int(st.session_state.get(key, 0))
+                        comp_default = max(0, min(comp_default, comp_max))
+                        try:
+                            comp_idx = st.number_input(f"{var}", min_value=0, max_value=comp_max, value=comp_default, step=1, key=key)
+                        except Exception:
+                            key = key + "::v2"
+                            comp_idx = st.number_input(f"{var}", min_value=0, max_value=comp_max, value=comp_default, step=1, key=key)
+                        var_components[var] = int(comp_idx)
+            else:
+                var_components = {v: None for v in vars_pick}
 
             # Map actual numbers -> internal IDs
             inv = node_inv if mode=="Nodal" else elem_inv
@@ -523,16 +534,17 @@ def render_dump(entry: Dict[str, Any]):
             if missing:
                 st.warning(f"Numbers not found and dropped: {missing}")
 
-            # Build DataFrame
-            entity_col = "Node Number" if mode == "Nodal" else "Element Number"
-            df = pd.DataFrame({entity_col: used_numbers})
+            # Build DataFrame with columns: Node/Element Number + each var (label with comp if present)
+            first_col_name = "Node Number" if mode=="Nodal" else "Element Number"
+            df = pd.DataFrame({first_col_name: used_numbers})
+            labels_map = {}  # var -> column label
             for var in vars_pick:
                 arr = np.array(g[var])
                 if arr.ndim == 1:
                     vals = [arr[i] if i is not None and i < arr.shape[0] else np.nan for i in ids]
                     label = var
                 else:
-                    comp = var_components[var] or 0
+                    comp = var_components.get(var) or 0
                     vals = [arr[i, comp] if i is not None and i < arr.shape[0] else np.nan for i in ids]
                     label = f"{var} [comp {comp}]"
                 clean = []
@@ -542,31 +554,34 @@ def render_dump(entry: Dict[str, Any]):
                     except Exception:
                         clean.append(np.nan)
                 df[label] = clean
+                labels_map[var] = label
 
             # Plot
-            if sec_choice != "None":
-                sec_label = None
-                for col in df.columns[1:]:
-                    if col.startswith(sec_choice):
-                        sec_label = col; break
+            if st.session_state.dump_secondary != "None":
+                sec_var = st.session_state.dump_secondary
+                sec_label = labels_map.get(sec_var)
                 fig = make_subplots(specs=[[{"secondary_y": True}]])
-                primary_labels = []
-                for col in df.columns[1:]:
+                prim_labels = []
+                for var in vars_pick:
+                    col = labels_map[var]
                     if col == sec_label:
                         continue
-                    primary_labels.append(col)
-                    fig.add_trace(go.Scattergl(x=df[entity_col], y=df[col], mode="lines+markers", name=col), secondary_y=False)
+                    prim_labels.append(col)
+                    fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[col], mode="lines+markers", name=col), secondary_y=False)
                 if sec_label is not None:
-                    fig.add_trace(go.Scattergl(x=df[entity_col], y=df[sec_label], mode="lines+markers", name=f"{sec_label} (right)"), secondary_y=True)
-                left_title = ", ".join(primary_labels) if len(primary_labels) > 1 else (primary_labels[0] if primary_labels else "Value")
-                right_title = sec_label or "Secondary"
-                ft_style(fig, x_title=entity_col, y_title_left=left_title, y_title_right=right_title)
+                    fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[sec_label], mode="lines+markers", name=f"{sec_label} (right)"), secondary_y=True)
+                y_left_title = ", ".join(prim_labels) if prim_labels else "Value"
+                y_right_title = sec_label or "Secondary"
+                ft_style(fig, x_title=first_col_name, y_title_left=y_left_title, y_title_right=y_right_title)
             else:
                 fig = go.Figure()
-                for col in df.columns[1:]:
-                    fig.add_trace(go.Scattergl(x=df[entity_col], y=df[col], mode="lines+markers", name=col))
-                left_title = ", ".join(df.columns[1:]) if len(df.columns) > 2 else df.columns[1]
-                ft_style(fig, x_title=entity_col, y_title_left=left_title)
+                prim_labels = []
+                for var in vars_pick:
+                    col = labels_map[var]
+                    prim_labels.append(col)
+                    fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[col], mode="lines+markers", name=col))
+                y_left_title = ", ".join(prim_labels) if prim_labels else "Value"
+                ft_style(fig, x_title=first_col_name, y_title_left=y_left_title)
 
             st.plotly_chart(fig, use_container_width=True)
 
@@ -595,4 +610,6 @@ if st.session_state.part_choice == "Equations":
 elif st.session_state.part_choice == "Materials":
     render_materials(active)
 else:
-    render_dump(active)
+    # Dump: put container/subgroup in sidebar, plotting in main
+    if render_dump_sidebar(active):
+        render_dump_main(active)
