@@ -21,6 +21,10 @@ st.set_page_config(page_title="HDF5 .plt Viewer (FEM, Plotly)", layout="wide")
 # =========================
 # Session init
 # =========================
+if "upload_key" not in st.session_state:
+    st.session_state.upload_key = 0
+if "active_id" not in st.session_state:
+    st.session_state.active_id = None
 if "files" not in st.session_state:
     # list of entries: {"id": str, "name": str, "path": str, "step": int|None, "dump_group": str|None, "time": float|None}
     st.session_state.files = []
@@ -215,7 +219,7 @@ with st.sidebar:
         type=["plt", "h5", "hdf5"],
         accept_multiple_files=True,
         help="Each file is one time step; filename suffix like `_002.plt` is used for ordering.",
-        key="uploader",
+        key=f"uploader_{st.session_state.upload_key}",
     )
 
     if uploads:
@@ -239,7 +243,11 @@ with st.sidebar:
             st.session_state.files.append(meta)
             added_ids.append(unique_id)
 
+        # focus the last added file
+        if added_ids:
+            st.session_state.active_id = added_ids[-1]
         st.session_state.flash_msg = f"Files loaded: {added_ids}"
+        st.session_state.upload_key += 1
         st.rerun()
 
     # flash after rerun
@@ -269,8 +277,14 @@ def sort_key(entry):
 
 files_sorted = sorted(st.session_state.files, key=sort_key)
 
-# Ensure active_index is within range
-st.session_state.active_index = min(max(0, st.session_state.active_index), len(files_sorted)-1)
+# Compute active index preferring active_id if set
+if st.session_state.active_id is not None:
+    try:
+        st.session_state.active_index = next(i for i, e in enumerate(files_sorted) if e.get("id") == st.session_state.active_id)
+    except StopIteration:
+        st.session_state.active_index = min(max(0, st.session_state.active_index), len(files_sorted)-1)
+else:
+    st.session_state.active_index = min(max(0, st.session_state.active_index), len(files_sorted)-1)
 active = files_sorted[st.session_state.active_index]
 
 # =========================
@@ -293,10 +307,13 @@ with cols[3]:
     sel = st.selectbox("Jump to file", options=list(range(len(files_sorted))), format_func=lambda i: labels[i], index=st.session_state.active_index, key="jump_file")
     if sel != st.session_state.active_index:
         st.session_state.active_index = sel
+        st.session_state.active_id = files_sorted[sel].get("id")
 with cols[4]:
     if st.button("Clear files", help="Forget uploaded files"):
         st.session_state.files = []
         st.session_state.active_index = 0
+        st.session_state.active_id = None
+        st.session_state.upload_key += 1
         st.rerun()
 
 st.caption(f"Dump group: {active.get('dump_group')} | Time: {active.get('time')} | File: {active.get('name')}")
