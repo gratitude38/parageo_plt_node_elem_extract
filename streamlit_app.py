@@ -44,7 +44,7 @@ st.session_state.setdefault("dump_secondary_select", "None")
 # =========================
 
 def bytes_to_str(x):
-    if isinstance(x, (bytes, bytearray)):
+    if isinstance(x, (bytes, bytearray, np.bytes_)):
         try:
             return x.decode("utf-8")
         except Exception:
@@ -144,18 +144,6 @@ def find_mapping_keys(g: h5py.Group, container_name: str) -> Tuple[Optional[str]
                 elem_key = k; break
     return topo_key, node_key, elem_key
 
-def classify_variables(g: h5py.Group, node_count: int, elem_count: int, exclude: List[str]) -> Tuple[List[str], List[str]]:
-    nodal, elem = [], []
-    for k, v in g.items():
-        if not isinstance(v, h5py.Dataset): continue
-        if k in exclude: continue
-        shape = v.shape
-        if len(shape)==0: continue
-        n0 = shape[0]
-        if n0 == node_count: nodal.append(k)
-        elif n0 == elem_count: elem.append(k)
-    return sorted(nodal), sorted(elem)
-
 def ft_style(fig: go.Figure, x_title: str, y_title_left: str, y_title_right: Optional[str] = None):
     """Apply an FT-like style. Only use 'secondary_y' when the figure actually has it."""
     fig.update_layout(
@@ -175,10 +163,6 @@ def ft_style(fig: go.Figure, x_title: str, y_title_left: str, y_title_right: Opt
     else:
         fig.update_yaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=y_title_left, secondary_y=False)
         fig.update_yaxes(title_text=y_title_right, secondary_y=True)
-
-# =========================
-# File analysis
-# =========================
 
 def analyze_file(dst_path: str, orig_name: str) -> Dict[str, Any]:
     suffix_step = extract_step_from_filename(orig_name)
@@ -201,6 +185,29 @@ def analyze_file(dst_path: str, orig_name: str) -> Dict[str, Any]:
     except Exception:
         pass
     return {"name": orig_name, "path": dst_path, "step": step_val, "dump_group": dump_group, "time": tval}
+
+# ---------- Safe HDF5 access helpers ----------
+def key_to_str(k) -> str:
+    if isinstance(k, (bytes, np.bytes_)):
+        try:
+            return k.decode('utf-8')
+        except Exception:
+            return str(k)
+    return str(k)
+
+def safe_h5_get(group: h5py.Group, name: Optional[str]) -> Optional[h5py.Group]:
+    if name is None:
+        return None
+    name = key_to_str(name)
+    try:
+        if name not in group:
+            return None
+        obj = group[name]
+    except TypeError:
+        return None
+    if not isinstance(obj, h5py.Group):
+        return None
+    return obj
 
 # =========================
 # Sidebar: uploader, sources, part toggle, dump container/subgroup
@@ -253,12 +260,10 @@ with st.sidebar:
     # Manage sources
     if st.session_state.files:
         st.subheader("Sources")
-        # Buttons to remove current / all
         c1, c2 = st.columns(2)
         if c1.button("Remove current file", help="Remove the active file"):
             if st.session_state.active_id is not None:
                 st.session_state.files = [x for x in st.session_state.files if x["id"] != st.session_state.active_id]
-                # choose new active: smallest step if any
                 if st.session_state.files:
                     files_sorted_tmp = sorted(st.session_state.files, key=lambda e: (999999 if e["step"] is None else int(e["step"]), e["name"]))
                     st.session_state.active_id = files_sorted_tmp[0]["id"]
@@ -352,29 +357,21 @@ def render_equations(entry: Dict[str, Any]):
             with c2:
                 obj = g[sel]
                 if isinstance(obj, h5py.Group):
-                    # Collect datasets (scalars, 1D, 2D)
                     cols = {}
                     max_len = 0
                     for k, v in obj.items():
                         if not isinstance(v, h5py.Dataset): continue
                         arr = np.array(v[()])
                         if arr.ndim == 0:
-                            cols[k] = [bytes_to_str(arr.item())]
-                            max_len = max(max_len, 1)
+                            cols[k] = [bytes_to_str(arr.item())]; max_len = max(max_len, 1)
                         elif arr.ndim == 1:
-                            cols[k] = arr.tolist()
-                            max_len = max(max_len, len(cols[k]))
+                            cols[k] = arr.tolist(); max_len = max(max_len, len(cols[k]))
                         elif arr.ndim == 2:
-                            # flatten components as separate columns
                             for j in range(arr.shape[1]):
                                 key = f"{k}[{j}]"
-                                cols[key] = arr[:, j].tolist()
-                                max_len = max(max_len, len(cols[key]))
+                                cols[key] = arr[:, j].tolist(); max_len = max(max_len, len(cols[key]))
                         else:
-                            # too deep — show shape only
-                            cols[k] = [f"array(shape={arr.shape})"]
-                            max_len = max(max_len, 1)
-                    # pad columns to equal length
+                            cols[k] = [f"array(shape={arr.shape})"]; max_len = max(max_len, 1)
                     for k, vals in cols.items():
                         if len(vals) < max_len:
                             cols[k] = vals + [None]*(max_len - len(vals))
@@ -442,38 +439,60 @@ def render_materials(entry: Dict[str, Any]):
 # Dump (container/subgroup in sidebar; plotting in main pane)
 # =========================
 
-def render_dump_sidebar(entry: Dict[str, Any]):
-    """Render Container/Subgroup in the sidebar and store selections."""
+def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
+    """Render Container/Subgroup in the sidebar and store selections. Returns True if ready."""
     path = entry["path"]
     dump_group = entry["dump_group"]
-    with h5py.File(path, "r") as f:
-        if not dump_group or dump_group not in f:
-            st.sidebar.info("This file has no Dump_* group.")
-            return False
-        root = f[dump_group]
-        containers = [k for k, v in root.items() if isinstance(v, h5py.Group)]
-        if not containers:
-            st.sidebar.info("Dump group has no containers.")
-            return False
+    try:
+        with h5py.File(path, "r") as f:
+            if not dump_group or dump_group not in f:
+                st.sidebar.info("This file has no Dump_* group.")
+                return False
+            root = f[dump_group]
+            containers = [k for k, v in root.items() if isinstance(v, h5py.Group)]
+            if not containers:
+                st.sidebar.info("Dump group has no containers.")
+                return False
 
-        # Container
-        # Container selection (robust)
-        selected_container = st.session_state.get("dump_container_select_sidebar")
-        if selected_container not in containers:
-            selected_container = containers[0]
-        selected_container = st.sidebar.selectbox("Container", containers, index=containers.index(selected_container), key="dump_container_select_sidebar")
+            # Container select using a safe default and store selection
+            prev_container = st.session_state.get("dump_container_select_sidebar")
+            if prev_container not in containers:
+                prev_container = containers[0]
+            selected_container = st.sidebar.selectbox(
+                "Container", containers,
+                index=containers.index(prev_container),
+                key="dump_container_select_sidebar"
+            )
 
-        # Subgroup selection (depends on container)
-        subgroups = list_groups(root[selected_container])
-        if not subgroups:
-            st.sidebar.info("Selected container has no subgroups.")
-            return False
-        selected_subgroup = st.session_state.get("dump_subgroup_select_sidebar")
-        if selected_subgroup not in subgroups:
-            selected_subgroup = subgroups[0]
-        selected_subgroup = st.sidebar.selectbox("Subgroup", subgroups, index=subgroups.index(selected_subgroup), key="dump_subgroup_select_sidebar")
+            grp = safe_h5_get(root, selected_container)
+            if grp is None:
+                st.sidebar.warning("Selected container is unavailable. Pick another.")
+                return False
 
-    return True
+            subgroups = list_groups(grp)
+            if not subgroups:
+                st.sidebar.info("Selected container has no subgroups.")
+                return False
+
+            prev_subgroup = st.session_state.get("dump_subgroup_select_sidebar")
+            if prev_subgroup not in subgroups:
+                prev_subgroup = subgroups[0]
+            selected_subgroup = st.sidebar.selectbox(
+                "Subgroup", subgroups,
+                index=subgroups.index(prev_subgroup),
+                key="dump_subgroup_select_sidebar"
+            )
+
+            # Final sanity
+            grp2 = safe_h5_get(grp, selected_subgroup)
+            if grp2 is None:
+                st.sidebar.warning("Selected subgroup is unavailable. Pick another.")
+                return False
+
+            return True
+    except Exception as e:
+        st.sidebar.error(f"Dump navigation error: {e}")
+        return False
 
 def render_dump_main(entry: Dict[str, Any]):
     path = entry["path"]
@@ -484,15 +503,18 @@ def render_dump_main(entry: Dict[str, Any]):
     try:
         with h5py.File(path, "r") as f:
             root = f[dump_group]
-            container = st.session_state.dump_container_select_sidebar
-            subgroup = st.session_state.dump_subgroup_select_sidebar
-            if container is None or subgroup is None or container not in root or subgroup not in root[container]:
-                st.info("Pick a Container and Subgroup in the sidebar.")
-                return
-            g = root[container][subgroup]
+            container = st.session_state.get("dump_container_select_sidebar")
+            subgroup = st.session_state.get("dump_subgroup_select_sidebar")
+
+            grp_container = safe_h5_get(root, container)
+            if grp_container is None:
+                st.info("Pick a Container in the sidebar."); return
+            g = safe_h5_get(grp_container, subgroup)
+            if g is None:
+                st.info("Pick a Subgroup in the sidebar."); return
 
             # Mapping keys based on container
-            topo_key, node_key, elem_key = find_mapping_keys(g, container_name=container)
+            topo_key, node_key, elem_key = find_mapping_keys(g, container_name=container or "")
             if not (node_key and elem_key):
                 st.error("Required mapping datasets not found (Node/Element Numbers).")
                 return
@@ -518,8 +540,7 @@ def render_dump_main(entry: Dict[str, Any]):
                 st.text_input(label_numbers, key="dump_numbers_input", placeholder="e.g., 1,2,3-10")
                 numbers_list = parse_int_list(st.session_state.dump_numbers_input)
             with c_sec:
-                # Reset secondary if it is not valid for current options
-                # Limit secondary choices to selected variables only
+                # Secondary choices limited to selected vars only
                 sec_pool = ["None"] + (vars_pick if vars_pick else [])
                 if st.session_state.dump_secondary_select not in sec_pool:
                     st.session_state.dump_secondary_select = "None"
