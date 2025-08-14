@@ -457,10 +457,13 @@ def render_materials(entry: Dict[str, Any]):
 # Dump (container/subgroup in sidebar; plotting in main pane)
 # =========================
 
+
 def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
     """Render Container/Subgroup in the sidebar and store selections. Returns True if ready."""
     path = entry["path"]
     dump_group = entry["dump_group"]
+    active_id = st.session_state.get("active_id")
+
     try:
         with h5py.File(path, "r") as f:
             if not dump_group or dump_group not in f:
@@ -472,38 +475,42 @@ def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
                 st.sidebar.info("Dump group has no containers.")
                 return False
 
-            # Always provide a valid selection (index=0 default); avoid pre-reading state
-            selected_container = st.sidebar.selectbox("Container", containers, index=0, key="dump_container_select_sidebar")
-            if selected_container is None or selected_container not in containers:
-                return False
+            # Resolve a preferred container: current file's previous, otherwise global last, otherwise first
+            prev_key = f"container_for::{active_id}"
+            preferred = st.session_state.get(prev_key, st.session_state.get("last_container_name"))
+            if preferred not in containers:
+                preferred = containers[0]
+            cont_idx = containers.index(preferred)
+
+            cont_key = f"dump_container_select_sidebar::{active_id}"
+            selected_container = st.sidebar.selectbox("Container", containers, index=cont_idx, key=cont_key)
+            # Remember selections by file and globally
+            st.session_state["last_container_name"] = selected_container
+            st.session_state[prev_key] = selected_container
 
             # Subgroups for the chosen container
-            try:
-                grp = root[selected_container]
-            except Exception:
-                st.sidebar.warning("Selected container is unavailable. Pick another.")
-                return False
-
+            grp = root[selected_container]
             subgroups = list_groups(grp)
             if not subgroups:
                 st.sidebar.info("Selected container has no subgroups.")
                 return False
 
-            selected_subgroup = st.sidebar.selectbox("Subgroup", subgroups, index=0, key="dump_subgroup_select_sidebar")
-            if selected_subgroup is None or selected_subgroup not in subgroups:
-                return False
+            prev_sub_key = f"subgroup_for::{active_id}::{selected_container}"
+            preferred_sub = st.session_state.get(prev_sub_key, st.session_state.get("last_subgroup_name"))
+            if preferred_sub not in subgroups:
+                preferred_sub = subgroups[0]
+            sub_idx = subgroups.index(preferred_sub)
 
-            # Final quick access check
-            try:
-                _ = grp[selected_subgroup]
-            except Exception:
-                st.sidebar.warning("Selected subgroup is unavailable. Pick another.")
-                return False
+            sub_key = f"dump_subgroup_select_sidebar::{active_id}::{selected_container}"
+            selected_subgroup = st.sidebar.selectbox("Subgroup", subgroups, index=sub_idx, key=sub_key)
+            st.session_state["last_subgroup_name"] = selected_subgroup
+            st.session_state[prev_sub_key] = selected_subgroup
 
             return True
     except Exception as e:
         st.sidebar.error(f"Dump navigation error: {e}")
         return False
+
 
 def render_dump_main(entry: Dict[str, Any]):
     path = entry["path"]
@@ -514,8 +521,8 @@ def render_dump_main(entry: Dict[str, Any]):
     try:
         with h5py.File(path, "r") as f:
             root = f[dump_group]
-            container = st.session_state.get("dump_container_select_sidebar")
-            subgroup = st.session_state.get("dump_subgroup_select_sidebar")
+            container = st.session_state.get(f"dump_container_select_sidebar::{st.session_state.get('active_id')}")
+            subgroup = st.session_state.get(f"dump_subgroup_select_sidebar::{st.session_state.get('active_id')}::{container}")
 
             grp_container = safe_h5_get(root, container)
             if grp_container is None:
