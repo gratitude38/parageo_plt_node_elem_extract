@@ -1,5 +1,3 @@
-
-
 import io
 import os
 import re
@@ -26,7 +24,7 @@ if "upload_key" not in st.session_state:
 if "active_id" not in st.session_state:
     st.session_state.active_id = None
 if "files" not in st.session_state:
-    # list of entries: {"id": str, "name": str, "path": str, "step": int|None, "dump_group": str|None, "time": float|None}
+    # entries: {"id": str, "name": str, "path": str, "step": int|None, "dump_group": str|None, "time": float|None}
     st.session_state.files = []
 if "active_index" not in st.session_state:
     st.session_state.active_index = 0
@@ -123,9 +121,9 @@ def invert_mapping(numbers: np.ndarray) -> Dict[int, int]:
     return inv
 
 def find_mapping_keys(g: h5py.Group, container_name: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Return (topology_key, node_map_key, elem_map_key) with rules:
-       - If container is 'Contact' (case-insensitive), use 'Contact Node number' & 'Contact Element number'
-       - Else, use 'Node Numbers' & 'Element Numbers'.
+    """Return (topology_key, node_map_key, elem_map_key).
+       - If container is 'Contact' (case-insensitive): 'Contact Node number' & 'Contact Element number'
+       - Else: 'Node Numbers' & 'Element Numbers'
        Topology is optional.
     """
     keys = list(g.keys())
@@ -166,6 +164,7 @@ def classify_variables(g: h5py.Group, node_count: int, elem_count: int, exclude:
     return sorted(nodal), sorted(elem)
 
 def ft_style(fig: go.Figure, x_title: str, y_title_left: str, y_title_right: Optional[str] = None):
+    """Apply an FT-like style. Only use 'secondary_y' when the figure actually has it."""
     fig.update_layout(
         paper_bgcolor="#fff1e5",
         plot_bgcolor="#fff1e5",
@@ -179,10 +178,10 @@ def ft_style(fig: go.Figure, x_title: str, y_title_left: str, y_title_right: Opt
     axis_color = "#262a33"
     fig.update_xaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=x_title)
     if y_title_right is None:
-        # Single y-axis figure
+        # Single y-axis
         fig.update_yaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=y_title_left)
     else:
-        # Dual y-axis (requires subplots with secondary_y)
+        # Dual y-axis (make_subplots required)
         fig.update_yaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=y_title_left, secondary_y=False)
         fig.update_yaxes(title_text=y_title_right, secondary_y=True)
 
@@ -235,7 +234,7 @@ with st.sidebar:
                 out.write(uf.read())
             meta = analyze_file(dst, uf.name)
 
-            # Build a unique id; allow duplicates even if same step and same filename (suffix later)
+            # Unique id; allow duplicates even if same step+filename by suffixing
             base_id = f"{meta['step'] or 'NA'}::{meta['name']}"
             unique_id = base_id
             i = 1
@@ -247,7 +246,7 @@ with st.sidebar:
             st.session_state.files.append(meta)
             added_ids.append(unique_id)
 
-        # focus the last added file
+        # focus the last added file and force rerun; also rotate uploader key
         if added_ids:
             st.session_state.active_id = added_ids[-1]
         st.session_state.flash_msg = f"Files loaded: {added_ids}"
@@ -299,14 +298,15 @@ cols = st.columns([1,1,4,2,1])
 with cols[0]:
     if st.button("◀ Prev", use_container_width=True, disabled=st.session_state.active_index <= 0):
         st.session_state.active_index = max(0, st.session_state.active_index - 1)
+        st.session_state.active_id = files_sorted[st.session_state.active_index].get("id")
 with cols[1]:
     if st.button("Next ▶", use_container_width=True, disabled=st.session_state.active_index >= len(files_sorted)-1):
         st.session_state.active_index = min(len(files_sorted)-1, st.session_state.active_index + 1)
+        st.session_state.active_id = files_sorted[st.session_state.active_index].get("id")
 with cols[2]:
     label = f"Step {active['step'] if active['step'] is not None else 'NA'} — {active['name']}"
     st.markdown(f"### {label}")
 with cols[3]:
-    # drop-down of all files
     labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']} ({e['id']})" for e in files_sorted]
     sel = st.selectbox("Jump to file", options=list(range(len(files_sorted))), format_func=lambda i: labels[i], index=st.session_state.active_index, key="jump_file")
     if sel != st.session_state.active_index:
@@ -460,7 +460,7 @@ def render_dump(entry: Dict[str, Any]):
             vars_pick = st.multiselect("Variables", var_options, default=default_vars, key="dump_vars_select")
             st.session_state.dump_vars = vars_pick
 
-            # Per-variable component selectors (no manual session_state writes for widget keys)
+            # Per-variable component selectors (no manual state writes for widget keys)
             var_components = {}
             for var in vars_pick:
                 arr = np.array(g[var])
@@ -472,7 +472,6 @@ def render_dump(entry: Dict[str, Any]):
                     try:
                         comp_idx = st.number_input(f"{var} • component", min_value=0, max_value=comp_max, value=comp_default, step=1, key=key)
                     except Exception:
-                        # Fallback with a unique key suffix if a collision occurs
                         key = key + "::v2"
                         comp_idx = st.number_input(f"{var} • component", min_value=0, max_value=comp_max, value=comp_default, step=1, key=key)
                     var_components[var] = int(comp_idx)
@@ -516,8 +515,13 @@ def render_dump(entry: Dict[str, Any]):
                     vals = [arr[i, comp] if i is not None and i < arr.shape[0] else np.nan for i in ids]
                     label = f"{var} [comp {comp}]"
                 # coerce to float for plotting/table
-                vals = [float(np.array(v).item()) if (isinstance(v, (np.generic,)) or np.isscalar(v)) else float(v) for v in vals]
-                df[label] = vals
+                clean = []
+                for v in vals:
+                    try:
+                        clean.append(float(np.array(v).item()))
+                    except Exception:
+                        clean.append(np.nan)
+                df[label] = clean
 
             # Plot
             if sec_choice != "None":
@@ -546,14 +550,13 @@ def render_dump(entry: Dict[str, Any]):
             html_bytes = fig.to_html(include_plotlyjs="cdn").encode("utf-8")
             st.download_button("Download plot (HTML)", data=html_bytes, file_name="plot.html", mime="text/html")
             try:
-                png_bytes = fig.to_image(format="png", scale=2)  # requires kaleido
+                png_bytes = fig.to_image(format="png", scale=2)  # needs kaleido
                 st.download_button("Download plot (PNG)", data=png_bytes, file_name="plot.png", mime="image/png")
-            except Exception as e:
+            except Exception:
                 st.caption("PNG export unavailable (kaleido not installed in this runtime).")
 
             # Table
             st.dataframe(df, use_container_width=True)
-            # CSV export for table (kept as a convenience)
             st.download_button("Download table (CSV)", data=df.to_csv(index=False).encode("utf-8"), file_name="table.csv", mime="text/csv")
 
     except Exception as e:
@@ -569,4 +572,3 @@ elif st.session_state.part_choice == "Materials":
     render_materials(active)
 else:
     render_dump(active)
-
