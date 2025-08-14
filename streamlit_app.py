@@ -460,17 +460,22 @@ def render_dump(entry: Dict[str, Any]):
             vars_pick = st.multiselect("Variables", var_options, default=default_vars, key="dump_vars_select")
             st.session_state.dump_vars = vars_pick
 
-            # Per-variable component selectors
+            # Per-variable component selectors (no manual session_state writes for widget keys)
             var_components = {}
             for var in vars_pick:
                 arr = np.array(g[var])
                 comp_max = arr.shape[1]-1 if (arr.ndim >= 2) else 0
                 if comp_max > 0:
                     key = f"comp::{container}::{subgroup}::{var}"
-                    comp_default = st.session_state.get(key, 0)
-                    comp_idx = st.number_input(f"{var} • component", min_value=0, max_value=comp_max, value=min(comp_default, comp_max), step=1, key=key)
+                    comp_default = int(st.session_state.get(key, 0))
+                    comp_default = max(0, min(comp_default, comp_max))
+                    try:
+                        comp_idx = st.number_input(f"{var} • component", min_value=0, max_value=comp_max, value=comp_default, step=1, key=key)
+                    except Exception:
+                        # Fallback with a unique key suffix if a collision occurs
+                        key = key + "::v2"
+                        comp_idx = st.number_input(f"{var} • component", min_value=0, max_value=comp_max, value=comp_default, step=1, key=key)
                     var_components[var] = int(comp_idx)
-                    st.session_state[key] = int(comp_idx)
                 else:
                     var_components[var] = None
 
