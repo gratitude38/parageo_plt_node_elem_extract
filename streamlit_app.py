@@ -439,6 +439,7 @@ def render_materials(entry: Dict[str, Any]):
 # Dump (container/subgroup in sidebar; plotting in main pane)
 # =========================
 
+
 def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
     """Render Container/Subgroup in the sidebar and store selections. Returns True if ready."""
     path = entry["path"]
@@ -454,18 +455,15 @@ def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
                 st.sidebar.info("Dump group has no containers.")
                 return False
 
-            # Container select using a safe default and store selection
-            prev_container = st.session_state.get("dump_container_select_sidebar")
-            if prev_container not in containers:
-                prev_container = containers[0]
-            selected_container = st.sidebar.selectbox(
-                "Container", containers,
-                index=containers.index(prev_container),
-                key="dump_container_select_sidebar"
-            )
+            # Always provide a valid selection (index=0 default); avoid pre-reading state
+            selected_container = st.sidebar.selectbox("Container", containers, index=0, key="dump_container_select_sidebar")
+            if selected_container is None or selected_container not in containers:
+                return False
 
-            grp = safe_h5_get(root, selected_container)
-            if grp is None:
+            # Subgroups for the chosen container
+            try:
+                grp = root[selected_container]
+            except Exception:
                 st.sidebar.warning("Selected container is unavailable. Pick another.")
                 return False
 
@@ -474,18 +472,14 @@ def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
                 st.sidebar.info("Selected container has no subgroups.")
                 return False
 
-            prev_subgroup = st.session_state.get("dump_subgroup_select_sidebar")
-            if prev_subgroup not in subgroups:
-                prev_subgroup = subgroups[0]
-            selected_subgroup = st.sidebar.selectbox(
-                "Subgroup", subgroups,
-                index=subgroups.index(prev_subgroup),
-                key="dump_subgroup_select_sidebar"
-            )
+            selected_subgroup = st.sidebar.selectbox("Subgroup", subgroups, index=0, key="dump_subgroup_select_sidebar")
+            if selected_subgroup is None or selected_subgroup not in subgroups:
+                return False
 
-            # Final sanity
-            grp2 = safe_h5_get(grp, selected_subgroup)
-            if grp2 is None:
+            # Final quick access check
+            try:
+                _ = grp[selected_subgroup]
+            except Exception:
                 st.sidebar.warning("Selected subgroup is unavailable. Pick another.")
                 return False
 
