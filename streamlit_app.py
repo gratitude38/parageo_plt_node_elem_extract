@@ -457,13 +457,20 @@ def render_materials(entry: Dict[str, Any]):
 # Dump (container/subgroup in sidebar; plotting in main pane)
 # =========================
 
-
 def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
-    """Render Container/Subgroup in the sidebar and store selections. Returns True if ready.
-       Persist selections per file and globally by container/subgroup names (works for any container)."""
+    """Render Container/Subgroup in the sidebar and store selections.
+       Persist selections generically across files; match names robustly (case-insensitive fallback)."""
     path = entry["path"]
     dump_group = entry["dump_group"]
     active_id = st.session_state.get("active_id")
+
+    def ci_find(name: Optional[str], options: List[str]) -> Optional[str]:
+        if not name: return None
+        lower = name.lower()
+        for o in options:
+            if o.lower() == lower:
+                return o
+        return None
 
     try:
         with h5py.File(path, "r") as f:
@@ -471,51 +478,79 @@ def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
                 st.sidebar.info("This file has no Dump_* group.")
                 return False
             root = f[dump_group]
-            containers = [k for k, v in root.items() if isinstance(v, h5py.Group)]
+
+            # ---- Containers (normalized to str) ----
+            containers = [key_to_str(k) for k, v in root.items() if isinstance(v, h5py.Group)]
             if not containers:
                 st.sidebar.info("Dump group has no containers.")
                 return False
 
-            # ----- Container selection -----
-            # Prefer per-file remembered container; otherwise use last globally chosen container name if present; else first.
+            # Preference chain: per-file -> global_last -> last_container_name -> last_container_any -> CI match -> first
             per_file_key = f"container_for::{active_id}"
-            global_key = "global_last_container"
-            preferred = st.session_state.get(per_file_key, st.session_state.get(global_key))
-            if preferred not in containers:
+            global_key   = "global_last_container"
+            candidates = [
+                st.session_state.get(per_file_key),
+                st.session_state.get(global_key),
+                st.session_state.get("last_container_name"),
+                st.session_state.get("last_container_any"),
+            ]
+            preferred = None
+            for c in candidates:
+                if c in containers:
+                    preferred = c; break
+                m = ci_find(c, containers)
+                if m:
+                    preferred = m; break
+            if preferred is None:
                 preferred = containers[0]
             cont_idx = containers.index(preferred)
 
             cont_key = f"dump_container_select_sidebar::{active_id}"
             selected_container = st.sidebar.selectbox("Container", containers, index=cont_idx, key=cont_key)
-            # Remember both per-file and global choice
+            # Remember selections
             st.session_state[per_file_key] = selected_container
             st.session_state[global_key] = selected_container
+            st.session_state["last_container_name"] = selected_container
+            st.session_state["last_container_any"] = selected_container
 
-            # ----- Subgroup selection -----
+            # ---- Subgroups for selected container ----
             grp = root[selected_container]
-            subgroups = list_groups(grp)
+            subgroups = [key_to_str(k) for k, v in grp.items() if isinstance(v, h5py.Group)]
             if not subgroups:
                 st.sidebar.info("Selected container has no subgroups.")
                 return False
 
             per_file_sub_key = f"subgroup_for::{active_id}::{selected_container}"
-            global_sub_key = f"global_last_subgroup::{selected_container}"
-            preferred_sub = st.session_state.get(per_file_sub_key, st.session_state.get(global_sub_key))
-            if preferred_sub not in subgroups:
+            global_sub_key   = f"global_last_subgroup::{selected_container}"
+            last_sub_any_key = f"last_sub_any::{selected_container}"
+            candidates_sub = [
+                st.session_state.get(per_file_sub_key),
+                st.session_state.get(global_sub_key),
+                st.session_state.get("last_subgroup_name"),
+                st.session_state.get(last_sub_any_key),
+            ]
+            preferred_sub = None
+            for c in candidates_sub:
+                if c in subgroups:
+                    preferred_sub = c; break
+                m = ci_find(c, subgroups)
+                if m:
+                    preferred_sub = m; break
+            if preferred_sub is None:
                 preferred_sub = subgroups[0]
             sub_idx = subgroups.index(preferred_sub)
 
             sub_key = f"dump_subgroup_select_sidebar::{active_id}::{selected_container}"
             selected_subgroup = st.sidebar.selectbox("Subgroup", subgroups, index=sub_idx, key=sub_key)
-            # Remember both per-file and per-container global subgroup
             st.session_state[per_file_sub_key] = selected_subgroup
             st.session_state[global_sub_key] = selected_subgroup
+            st.session_state["last_subgroup_name"] = selected_subgroup
+            st.session_state[last_sub_any_key] = selected_subgroup
 
             return True
     except Exception as e:
         st.sidebar.error(f"Dump navigation error: {e}")
         return False
-
 
 def render_dump_main(entry: Dict[str, Any]):
     path = entry["path"]
