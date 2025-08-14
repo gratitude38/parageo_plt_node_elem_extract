@@ -457,18 +457,21 @@ def render_dump_sidebar(entry: Dict[str, Any]):
             return False
 
         # Container
-        if st.session_state.dump_container_select_sidebar not in containers:
-            st.session_state.dump_container_select_sidebar = containers[0]
-        st.sidebar.selectbox("Container", containers, index=containers.index(st.session_state.dump_container_select_sidebar), key="dump_container_select_sidebar")
+        # Container selection (robust)
+        selected_container = st.session_state.get("dump_container_select_sidebar")
+        if selected_container not in containers:
+            selected_container = containers[0]
+        selected_container = st.sidebar.selectbox("Container", containers, index=containers.index(selected_container), key="dump_container_select_sidebar")
 
-        # Subgroup
-        subgroups = list_groups(root[st.session_state.dump_container_select_sidebar])
+        # Subgroup selection (depends on container)
+        subgroups = list_groups(root[selected_container])
         if not subgroups:
             st.sidebar.info("Selected container has no subgroups.")
             return False
-        if st.session_state.dump_subgroup_select_sidebar not in subgroups:
-            st.session_state.dump_subgroup_select_sidebar = subgroups[0]
-        st.sidebar.selectbox("Subgroup", subgroups, index=subgroups.index(st.session_state.dump_subgroup_select_sidebar), key="dump_subgroup_select_sidebar")
+        selected_subgroup = st.session_state.get("dump_subgroup_select_sidebar")
+        if selected_subgroup not in subgroups:
+            selected_subgroup = subgroups[0]
+        selected_subgroup = st.sidebar.selectbox("Subgroup", subgroups, index=subgroups.index(selected_subgroup), key="dump_subgroup_select_sidebar")
 
     return True
 
@@ -516,9 +519,11 @@ def render_dump_main(entry: Dict[str, Any]):
                 numbers_list = parse_int_list(st.session_state.dump_numbers_input)
             with c_sec:
                 # Reset secondary if it is not valid for current options
-                if st.session_state.dump_secondary_select not in (["None"] + var_options):
+                # Limit secondary choices to selected variables only
+                sec_pool = ["None"] + (vars_pick if vars_pick else [])
+                if st.session_state.dump_secondary_select not in sec_pool:
                     st.session_state.dump_secondary_select = "None"
-                st.selectbox("Secondary y-axis", ["None"] + var_options, key="dump_secondary_select")
+                st.selectbox("Secondary y-axis", sec_pool, key="dump_secondary_select")
                 sec_choice = st.session_state.dump_secondary_select
 
             if not vars_pick or not numbers_list:
