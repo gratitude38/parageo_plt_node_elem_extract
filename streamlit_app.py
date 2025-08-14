@@ -178,8 +178,12 @@ def ft_style(fig: go.Figure, x_title: str, y_title_left: str, y_title_right: Opt
     grid_color = "#d9d6ce"
     axis_color = "#262a33"
     fig.update_xaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=x_title)
-    fig.update_yaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=y_title_left, secondary_y=False)
-    if y_title_right:
+    if y_title_right is None:
+        # Single y-axis figure
+        fig.update_yaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=y_title_left)
+    else:
+        # Dual y-axis (requires subplots with secondary_y)
+        fig.update_yaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=y_title_left, secondary_y=False)
         fig.update_yaxes(title_text=y_title_right, secondary_y=True)
 
 # =========================
