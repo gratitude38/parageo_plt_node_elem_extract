@@ -233,7 +233,7 @@ with st.sidebar:
         if new_meta:
             st.session_state.files_meta.update(new_meta)
             st.cache_data.clear()
-            st.experimental_rerun()
+            st.rerun()
 
     st.divider()
     st.header("View")
@@ -268,7 +268,7 @@ with cols[4]:
     if st.button("Clear files", help="Forget uploaded files"):
         st.session_state.files_meta = {}
         st.session_state.active_step_index = 0
-        st.experimental_rerun()
+        st.rerun()
 
 meta = st.session_state.files_meta[active_step]
 st.caption(f"File: {meta['name']}")
