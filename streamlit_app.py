@@ -457,7 +457,6 @@ def render_materials(entry: Dict[str, Any]):
 # Dump (container/subgroup in sidebar; plotting in main pane)
 # =========================
 
-
 def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
     """Render Container/Subgroup in the sidebar and store selections. Returns True if ready."""
     path = entry["path"]
@@ -511,7 +510,6 @@ def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
         st.sidebar.error(f"Dump navigation error: {e}")
         return False
 
-
 def render_dump_main(entry: Dict[str, Any]):
     path = entry["path"]
     dump_group = entry["dump_group"]
@@ -541,17 +539,29 @@ def render_dump_main(entry: Dict[str, Any]):
             node_inv = invert_mapping(node_numbers)
             elem_inv = invert_mapping(elem_numbers)
 
-            # Controls row (Variables + Numbers + Secondary) with namespaced keys per file/container/subgroup
-            active_id = st.session_state.get("active_id")
-            mode_key = f"mode::{active_id}::{container}::{subgroup}"
-            if mode_key not in st.session_state:
-                st.session_state[mode_key] = st.session_state.get("last_mode", "Nodal")
-            st.radio("Variable type", ["Nodal", "Element"], horizontal=True, key=mode_key)
-            mode = st.session_state[mode_key]
-            st.session_state["last_mode"] = mode
+            # Precompute variable lists
             num_nodes, num_elems = node_numbers.shape[0], elem_numbers.shape[0]
             exclude = [k for k in [topo_key, node_key, elem_key] if k]
             nodal_vars, elem_vars = classify_variables(g, node_count=num_nodes, elem_count=num_elems, exclude=exclude)
+
+            # Decide default mode based on last selection for this (container, subgroup)
+            active_id = st.session_state.get("active_id")
+            group_key = f"group::{container}::{subgroup}"
+            last_vars_for_group = st.session_state.get(f"last_vars_for::{group_key}", [])
+            proposed_mode = st.session_state.get(f"last_mode_for::{group_key}", st.session_state.get("last_mode", "Nodal"))
+            if any(v in elem_vars for v in last_vars_for_group):
+                proposed_mode = "Element"
+            elif any(v in nodal_vars for v in last_vars_for_group):
+                proposed_mode = "Nodal"
+
+            # Controls row (Variables + Numbers + Secondary) with namespaced keys per file/container/subgroup
+            mode_key = f"mode::{active_id}::{container}::{subgroup}"
+            if mode_key not in st.session_state:
+                st.session_state[mode_key] = proposed_mode
+            st.radio("Variable type", ["Nodal", "Element"], horizontal=True, key=mode_key)
+            mode = st.session_state[mode_key]
+            st.session_state["last_mode"] = mode
+            st.session_state[f"last_mode_for::{group_key}"] = mode
             var_options = nodal_vars if mode=="Nodal" else elem_vars
 
             # Namespaced keys per file/container/subgroup/mode
@@ -573,6 +583,7 @@ def render_dump_main(entry: Dict[str, Any]):
                 st.multiselect("Variables", var_options, key=vars_key)
                 vars_pick = st.session_state[vars_key]
                 st.session_state["last_vars"] = vars_pick
+                st.session_state[f"last_vars_for::{group_key}"] = vars_pick
             with c_nums:
                 label_numbers = "Enter nodal NUMBERS (not IDs)" if mode=="Nodal" else "Enter element NUMBERS (not IDs)"
                 st.text_input(label_numbers, key=nums_key, placeholder="e.g., 1,2,3-10")
@@ -622,7 +633,14 @@ def render_dump_main(entry: Dict[str, Any]):
             if missing:
                 st.warning(f"Numbers not found and dropped: {missing}")
             if len(ids) == 0 or len(used_numbers) == 0:
-                st.info("No valid numbers present in this file for the current selection. Your inputs are kept — try a different container/subgroup or adjust numbers.")
+                # Draw an annotated empty figure so the plot area doesn't disappear
+                fig = go.Figure()
+                fig.add_annotation(text="No valid numbers in this step for the current selection",
+                                   xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+                ft_style(fig, x_title=("Node Number" if mode=="Nodal" else "Element Number"), y_title_left="Value")
+                st.plotly_chart(fig, use_container_width=True)
+                status_df = pd.DataFrame({"requested": numbers_list, "found": [n in used_numbers for n in numbers_list]})
+                st.dataframe(status_df, use_container_width=True)
                 return
 
             # Build DataFrame
