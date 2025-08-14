@@ -210,7 +210,7 @@ with st.sidebar:
             tmpdir = tempfile.mkdtemp(prefix="plt_")
             dst = os.path.join(tmpdir, uf.name)
             with open(dst, "wb") as out:
-                out.write(uf.getbuffer())
+                out.write(uf.read())
             try:
                 with h5py.File(dst, "r") as f:
                     dump_group = get_dump_group(f, suffix_step)
@@ -229,6 +229,9 @@ with st.sidebar:
                 continue
             if step is None:
                 step = max(st.session_state.files_meta.keys(), default=-1) + 1
+            base_step = step
+            while step in st.session_state.files_meta or step in new_meta:
+                step += 1
             new_meta[step] = {"name": uf.name, "path": dst}
         if new_meta:
             st.session_state.files_meta.update(new_meta)
@@ -238,6 +241,10 @@ with st.sidebar:
     st.divider()
     st.header("View")
     part_choice = st.radio("Available parts", ["Dump", "Equations", "Materials"], index=0, help="Only one section shown at a time.")
+
+    # Status: show loaded steps to confirm ingestion
+    if st.session_state.files_meta:
+        st.caption(f"Loaded steps: {sorted(st.session_state.files_meta.keys())}")
 
 # If no files loaded, stop here
 if not st.session_state.files_meta:
