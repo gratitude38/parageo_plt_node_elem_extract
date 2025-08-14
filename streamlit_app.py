@@ -1,3 +1,4 @@
+
 import io
 import os
 import re
@@ -178,10 +179,8 @@ def ft_style(fig: go.Figure, x_title: str, y_title_left: str, y_title_right: Opt
     axis_color = "#262a33"
     fig.update_xaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=x_title)
     if y_title_right is None:
-        # Single y-axis
         fig.update_yaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=y_title_left)
     else:
-        # Dual y-axis (make_subplots required)
         fig.update_yaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=y_title_left, secondary_y=False)
         fig.update_yaxes(title_text=y_title_right, secondary_y=True)
 
@@ -299,10 +298,12 @@ with cols[0]:
     if st.button("◀ Prev", use_container_width=True, disabled=st.session_state.active_index <= 0):
         st.session_state.active_index = max(0, st.session_state.active_index - 1)
         st.session_state.active_id = files_sorted[st.session_state.active_index].get("id")
+        st.rerun()
 with cols[1]:
     if st.button("Next ▶", use_container_width=True, disabled=st.session_state.active_index >= len(files_sorted)-1):
         st.session_state.active_index = min(len(files_sorted)-1, st.session_state.active_index + 1)
         st.session_state.active_id = files_sorted[st.session_state.active_index].get("id")
+        st.rerun()
 with cols[2]:
     label = f"Step {active['step'] if active['step'] is not None else 'NA'} — {active['name']}"
     st.markdown(f"### {label}")
@@ -313,14 +314,40 @@ with cols[3]:
         st.session_state.active_index = sel
         st.session_state.active_id = files_sorted[sel].get("id")
 with cols[4]:
-    if st.button("Clear files", help="Forget uploaded files"):
-        st.session_state.files = []
-        st.session_state.active_index = 0
-        st.session_state.active_id = None
-        st.session_state.upload_key += 1
+    if st.button("🗑 Remove current file", help="Remove the selected file"):
+        try:
+            del st.session_state.files[st.session_state.active_index]
+        except Exception:
+            pass
+        if st.session_state.files:
+            st.session_state.active_index = min(st.session_state.active_index, len(st.session_state.files)-1)
+            st.session_state.active_id = st.session_state.files[st.session_state.active_index].get("id")
+        else:
+            st.session_state.active_index = 0
+            st.session_state.active_id = None
         st.rerun()
 
 st.caption(f"Dump group: {active.get('dump_group')} | Time: {active.get('time')} | File: {active.get('name')}")
+
+# Sidebar selectors for Dump (container/subgroup)
+if st.session_state.part_choice == "Dump" and active.get("dump_group"):
+    try:
+        with h5py.File(active["path"], "r") as _f:
+            _root = _f[active["dump_group"]]
+            _containers = [k for k, v in _root.items() if isinstance(v, h5py.Group)]
+            if _containers:
+                if st.session_state.dump_container not in _containers:
+                    st.session_state.dump_container = _containers[0]
+                with st.sidebar:
+                    st.subheader("Dump selection")
+                    st.session_state.dump_container = st.selectbox("Container", _containers, index=_containers.index(st.session_state.dump_container), key="dump_container_select")
+                    _subs = [k for k, v in _root[st.session_state.dump_container].items() if isinstance(v, h5py.Group)]
+                    if _subs:
+                        if st.session_state.dump_subgroup not in _subs:
+                            st.session_state.dump_subgroup = _subs[0]
+                        st.session_state.dump_subgroup = st.selectbox("Subgroup", _subs, index=_subs.index(st.session_state.dump_subgroup), key="dump_subgroup_select")
+    except Exception as _e:
+        st.sidebar.error(f"Dump navigation error: {_e}")
 
 # =========================
 # Equations (side-by-side, scalars only)
@@ -417,21 +444,14 @@ def render_dump(entry: Dict[str, Any]):
             if not containers:
                 st.info("Dump group has no containers."); return
 
-            # Container select (remember prior selection)
+            # Use selection from sidebar
             if st.session_state.dump_container not in containers:
-                st.session_state.dump_container = containers[0]
-            container = st.selectbox("Container", containers, index=containers.index(st.session_state.dump_container), key="dump_container_select")
-            st.session_state.dump_container = container
-
-            # Subgroup select
+                st.info("Dump has no recognized containers."); return
+            container = st.session_state.dump_container
             subgroups = list_groups(root[container])
-            if not subgroups:
-                st.info("Selected container has no subgroups."); return
-            if st.session_state.dump_subgroup not in subgroups:
-                st.session_state.dump_subgroup = subgroups[0]
-            subgroup = st.selectbox("Subgroup", subgroups, index=subgroups.index(st.session_state.dump_subgroup), key="dump_subgroup_select")
-            st.session_state.dump_subgroup = subgroup
-
+            if not subgroups or st.session_state.dump_subgroup not in subgroups:
+                st.info("Selected container has no recognized subgroups."); return
+            subgroup = st.session_state.dump_subgroup
             g = root[container][subgroup]
 
             # Mapping keys based on container
@@ -455,12 +475,24 @@ def render_dump(entry: Dict[str, Any]):
             if not var_options:
                 st.info(f"No {mode.lower()} variables detected in this subgroup."); return
 
-            # Variables to plot (remember selection)
-            default_vars = [v for v in st.session_state.dump_vars if v in var_options]
-            vars_pick = st.multiselect("Variables", var_options, default=default_vars, key="dump_vars_select")
-            st.session_state.dump_vars = vars_pick
+            # Side-by-side inputs: Variables, Numbers, Secondary axis
+            c_vars, c_nums, c_sec = st.columns([2, 1.2, 1])
+            with c_vars:
+                default_vars = [v for v in st.session_state.dump_vars if v in var_options]
+                vars_pick = st.multiselect("Variables", var_options, default=default_vars, key="dump_vars_select")
+                st.session_state.dump_vars = vars_pick
+            with c_nums:
+                numbers_default = st.session_state.dump_numbers
+                numbers_text = st.text_input(f"Enter {mode.lower()} NUMBERS (not IDs)", value=numbers_default, placeholder="e.g., 1,2,3-10", key="dump_numbers_input")
+                st.session_state.dump_numbers = numbers_text
+                numbers_list = parse_int_list(numbers_text)
+            with c_sec:
+                sec_options = ["None"] + vars_pick
+                sec_default = st.session_state.dump_secondary if st.session_state.dump_secondary in sec_options else "None"
+                sec_choice = st.selectbox("Secondary y-axis (optional)", sec_options, index=sec_options.index(sec_default), key="dump_secondary_select")
+                st.session_state.dump_secondary = sec_choice
 
-            # Per-variable component selectors (no manual state writes for widget keys)
+            # Per-variable component selectors below
             var_components = {}
             for var in vars_pick:
                 arr = np.array(g[var])
@@ -478,18 +510,6 @@ def render_dump(entry: Dict[str, Any]):
                 else:
                     var_components[var] = None
 
-            # Numbers input (remember)
-            numbers_default = st.session_state.dump_numbers
-            numbers_text = st.text_input(f"Enter {mode.lower()} NUMBERS (not IDs)", value=numbers_default, placeholder="e.g., 1,2,3-10", key="dump_numbers_input")
-            st.session_state.dump_numbers = numbers_text
-            numbers_list = parse_int_list(numbers_text)
-
-            # Secondary Y selection
-            sec_options = ["None"] + vars_pick
-            sec_default = st.session_state.dump_secondary if st.session_state.dump_secondary in sec_options else "None"
-            sec_choice = st.selectbox("Secondary y-axis (optional)", sec_options, index=sec_options.index(sec_default), key="dump_secondary_select")
-            st.session_state.dump_secondary = sec_choice
-
             if not vars_pick or not numbers_list:
                 st.info("Choose at least one variable and enter a list of numbers to plot.")
                 return
@@ -503,8 +523,9 @@ def render_dump(entry: Dict[str, Any]):
             if missing:
                 st.warning(f"Numbers not found and dropped: {missing}")
 
-            # Build DataFrame with columns: entity_number + each var (label with component if present)
-            df = pd.DataFrame({"entity_number": used_numbers})
+            # Build DataFrame
+            entity_col = "Node Number" if mode == "Nodal" else "Element Number"
+            df = pd.DataFrame({entity_col: used_numbers})
             for var in vars_pick:
                 arr = np.array(g[var])
                 if arr.ndim == 1:
@@ -514,7 +535,6 @@ def render_dump(entry: Dict[str, Any]):
                     comp = var_components[var] or 0
                     vals = [arr[i, comp] if i is not None and i < arr.shape[0] else np.nan for i in ids]
                     label = f"{var} [comp {comp}]"
-                # coerce to float for plotting/table
                 clean = []
                 for v in vals:
                     try:
@@ -525,24 +545,28 @@ def render_dump(entry: Dict[str, Any]):
 
             # Plot
             if sec_choice != "None":
-                # Map sec label (consider comp suffix)
                 sec_label = None
                 for col in df.columns[1:]:
                     if col.startswith(sec_choice):
                         sec_label = col; break
                 fig = make_subplots(specs=[[{"secondary_y": True}]])
+                primary_labels = []
                 for col in df.columns[1:]:
                     if col == sec_label:
                         continue
-                    fig.add_trace(go.Scattergl(x=df["entity_number"], y=df[col], mode="lines+markers", name=col), secondary_y=False)
+                    primary_labels.append(col)
+                    fig.add_trace(go.Scattergl(x=df[entity_col], y=df[col], mode="lines+markers", name=col), secondary_y=False)
                 if sec_label is not None:
-                    fig.add_trace(go.Scattergl(x=df["entity_number"], y=df[sec_label], mode="lines+markers", name=f"{sec_label} (right)"), secondary_y=True)
-                ft_style(fig, x_title=f"{mode} number", y_title_left="Primary", y_title_right="Secondary")
+                    fig.add_trace(go.Scattergl(x=df[entity_col], y=df[sec_label], mode="lines+markers", name=f"{sec_label} (right)"), secondary_y=True)
+                left_title = ", ".join(primary_labels) if len(primary_labels) > 1 else (primary_labels[0] if primary_labels else "Value")
+                right_title = sec_label or "Secondary"
+                ft_style(fig, x_title=entity_col, y_title_left=left_title, y_title_right=right_title)
             else:
                 fig = go.Figure()
                 for col in df.columns[1:]:
-                    fig.add_trace(go.Scattergl(x=df["entity_number"], y=df[col], mode="lines+markers", name=col))
-                ft_style(fig, x_title=f"{mode} number", y_title_left="Value")
+                    fig.add_trace(go.Scattergl(x=df[entity_col], y=df[col], mode="lines+markers", name=col))
+                left_title = ", ".join(df.columns[1:]) if len(df.columns) > 2 else df.columns[1]
+                ft_style(fig, x_title=entity_col, y_title_left=left_title)
 
             st.plotly_chart(fig, use_container_width=True)
 
