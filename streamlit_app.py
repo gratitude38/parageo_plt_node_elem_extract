@@ -144,6 +144,24 @@ def find_mapping_keys(g: h5py.Group, container_name: str) -> Tuple[Optional[str]
                 elem_key = k; break
     return topo_key, node_key, elem_key
 
+def classify_variables(g: h5py.Group, node_count: int, elem_count: int, exclude: List[str]) -> Tuple[List[str], List[str]]:
+    """Classify datasets under group g into nodal vs element variables by first-dimension length."""
+    nodal, elem = [], []
+    for k, v in g.items():
+        if not isinstance(v, h5py.Dataset):
+            continue
+        if k in exclude:
+            continue
+        shape = v.shape
+        if len(shape) == 0:
+            continue
+        n0 = shape[0]
+        if n0 == node_count:
+            nodal.append(k)
+        elif n0 == elem_count:
+            elem.append(k)
+    return sorted(nodal), sorted(elem)
+
 def ft_style(fig: go.Figure, x_title: str, y_title_left: str, y_title_right: Optional[str] = None):
     """Apply an FT-like style. Only use 'secondary_y' when the figure actually has it."""
     fig.update_layout(
@@ -203,7 +221,7 @@ def safe_h5_get(group: h5py.Group, name: Optional[str]) -> Optional[h5py.Group]:
         if name not in group:
             return None
         obj = group[name]
-    except TypeError:
+    except Exception:
         return None
     if not isinstance(obj, h5py.Group):
         return None
@@ -438,7 +456,6 @@ def render_materials(entry: Dict[str, Any]):
 # =========================
 # Dump (container/subgroup in sidebar; plotting in main pane)
 # =========================
-
 
 def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
     """Render Container/Subgroup in the sidebar and store selections. Returns True if ready."""
