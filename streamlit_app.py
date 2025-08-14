@@ -541,29 +541,51 @@ def render_dump_main(entry: Dict[str, Any]):
             node_inv = invert_mapping(node_numbers)
             elem_inv = invert_mapping(elem_numbers)
 
-            # Controls row (Variables + Numbers + Secondary)
-            st.radio("Variable type", ["Nodal", "Element"], horizontal=True, key="dump_mode_radio")
-            mode = st.session_state.dump_mode_radio
+            # Controls row (Variables + Numbers + Secondary) with namespaced keys per file/container/subgroup
+            active_id = st.session_state.get("active_id")
+            mode_key = f"mode::{active_id}::{container}::{subgroup}"
+            if mode_key not in st.session_state:
+                st.session_state[mode_key] = st.session_state.get("last_mode", "Nodal")
+            st.radio("Variable type", ["Nodal", "Element"], horizontal=True, key=mode_key)
+            mode = st.session_state[mode_key]
+            st.session_state["last_mode"] = mode
             num_nodes, num_elems = node_numbers.shape[0], elem_numbers.shape[0]
             exclude = [k for k in [topo_key, node_key, elem_key] if k]
             nodal_vars, elem_vars = classify_variables(g, node_count=num_nodes, elem_count=num_elems, exclude=exclude)
             var_options = nodal_vars if mode=="Nodal" else elem_vars
 
+            # Namespaced keys per file/container/subgroup/mode
+            vars_key = f"vars::{active_id}::{container}::{subgroup}::{mode}"
+            nums_key = f"nums::{active_id}::{container}::{subgroup}::{mode}"
+            sec_key  = f"sec::{active_id}::{container}::{subgroup}::{mode}"
+            # Initialize from last_* carriers when first seen
+            if vars_key not in st.session_state:
+                last_vars = st.session_state.get("last_vars", [])
+                st.session_state[vars_key] = [v for v in last_vars if v in var_options]
+            if nums_key not in st.session_state:
+                st.session_state[nums_key] = st.session_state.get("last_numbers", "")
+            if sec_key not in st.session_state:
+                lv = st.session_state.get("last_secondary", "None")
+                st.session_state[sec_key] = lv if lv in st.session_state[vars_key] else "None"
+
             c_vars, c_nums, c_sec = st.columns([2,2,1])
             with c_vars:
-                st.multiselect("Variables", var_options, key="dump_vars_select")
-                vars_pick = st.session_state.dump_vars_select
+                st.multiselect("Variables", var_options, key=vars_key)
+                vars_pick = st.session_state[vars_key]
+                st.session_state["last_vars"] = vars_pick
             with c_nums:
                 label_numbers = "Enter nodal NUMBERS (not IDs)" if mode=="Nodal" else "Enter element NUMBERS (not IDs)"
-                st.text_input(label_numbers, key="dump_numbers_input", placeholder="e.g., 1,2,3-10")
-                numbers_list = parse_int_list(st.session_state.dump_numbers_input)
+                st.text_input(label_numbers, key=nums_key, placeholder="e.g., 1,2,3-10")
+                numbers_list = parse_int_list(st.session_state[nums_key])
+                st.session_state["last_numbers"] = st.session_state[nums_key]
             with c_sec:
                 # Secondary choices limited to selected vars only
                 sec_pool = ["None"] + (vars_pick if vars_pick else [])
-                if st.session_state.dump_secondary_select not in sec_pool:
-                    st.session_state.dump_secondary_select = "None"
-                st.selectbox("Secondary y-axis", sec_pool, key="dump_secondary_select")
-                sec_choice = st.session_state.dump_secondary_select
+                if st.session_state[sec_key] not in sec_pool:
+                    st.session_state[sec_key] = "None"
+                st.selectbox("Secondary y-axis", sec_pool, key=sec_key)
+                sec_choice = st.session_state[sec_key]
+                st.session_state["last_secondary"] = sec_choice
 
             if not vars_pick or not numbers_list:
                 st.info("Choose at least one variable and enter a list of numbers to plot.")
@@ -581,7 +603,7 @@ def render_dump_main(entry: Dict[str, Any]):
                 comp_cols = st.columns(len(vec_vars))
                 for (var, comp_max), col in zip(vec_vars, comp_cols):
                     with col:
-                        key = f"comp::{container}::{subgroup}::{var}"
+                        key = f"comp::{active_id}::{container}::{subgroup}::{var}"
                         default = int(st.session_state.get(key, 0))
                         default = max(0, min(default, comp_max))
                         try:
@@ -599,6 +621,9 @@ def render_dump_main(entry: Dict[str, Any]):
             used_numbers = [n for n in numbers_list if inv.get(n) is not None]
             if missing:
                 st.warning(f"Numbers not found and dropped: {missing}")
+            if len(ids) == 0 or len(used_numbers) == 0:
+                st.info("No valid numbers present in this file for the current selection. Your inputs are kept — try a different container/subgroup or adjust numbers.")
+                return
 
             # Build DataFrame
             first_col_name = "Node Number" if mode=="Nodal" else "Element Number"
