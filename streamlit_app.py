@@ -515,6 +515,22 @@ def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
         st.sidebar.error(f"Dump navigation error: {e}")
         return False
 
+def clean_axis_title(label: str, fallback: str = "Value") -> str:
+    """Strip node/element numbers and suffixes from a legend label.
+    Examples:
+      'Contact Normal Effective stress 392'           -> 'Contact Normal Effective stress'
+      'Deviatoric Stress [comp 1] @ Node 271 (right)' -> 'Deviatoric Stress'
+    """
+    if not label:
+        return fallback
+    s = label
+    s = re.sub(r"\s*\(right\)$", "", s)          # drop ' (right)'
+    s = re.sub(r"\s*\[comp[^\]]*\]\s*", "", s)   # drop ' [comp k]'
+    s = re.sub(r"\s*@\s*(Node|Elem).*?$", "", s) # drop '@ Node 123' / '@ Elem 45'
+    s = re.sub(r"\s+(Node|Elem)\s*\d+\s*$", "", s)  # drop 'Node 123' or 'Elem 45' at end
+    s = re.sub(r"\s*\d+\s*$", "", s)             # drop trailing bare numbers
+    return s.strip() or fallback
+
 # -----------------------------
 # Dump: Main (stable widgets + per-group store)
 # -----------------------------
@@ -699,8 +715,10 @@ def render_dump_main(entry: Dict[str, Any]):
                         prim_labels.append(col)
                         fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[col], mode="lines+markers", name=col), secondary_y=False)
                     fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[sec_label], mode="lines+markers", name=f"{sec_label} (right)"), secondary_y=True)
-                    y_left_title = ", ".join(prim_labels) if prim_labels else "Value"
-                    y_right_title = sec_label or "Secondary"
+                    #y_left_title = ", ".join(prim_labels) if prim_labels else "Value"
+                    y_left_title = clean_axis_title(prim_labels[0]) if prim_labels else "Value"
+                    #y_right_title = sec_label or "Secondary"
+                    y_right_title = clean_axis_title(sec_label)
                     ft_style(fig, x_title=first_col_name, y_title_left=y_left_title, y_title_right=y_right_title)
                 else:
                     fig = go.Figure()
@@ -711,7 +729,8 @@ def render_dump_main(entry: Dict[str, Any]):
                         col = labels_map[var]
                         prim_labels.append(col)
                         fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[col], mode="lines+markers", name=col))
-                    y_left_title = ", ".join(prim_labels) if prim_labels else "Value"
+                    #y_left_title = ", ".join(prim_labels) if prim_labels else "Value"
+                    y_left_title = clean_axis_title(prim_labels[0]) if prim_labels else "Value"
                     ft_style(fig, x_title=first_col_name, y_title_left=y_left_title)
 
                 st.plotly_chart(fig, use_container_width=True)
@@ -851,9 +870,10 @@ def render_dump_main(entry: Dict[str, Any]):
                     for c in data_cols:
                         if is_sec_label(c):
                             fig.add_trace(go.Scattergl(x=df_ts[x_name], y=df_ts[c], mode="lines+markers", name=f"{c} (right)"), secondary_y=True)
-                    # y_left = ", ".join(prim_labels) if prim_labels else "Value"
-                    y_left = prim_labels[0]
-                    y_right = sec_choice
+                    #y_left = ", ".join(prim_labels) if prim_labels else "Value"
+                    #y_right = sec_choice
+                    y_left  = clean_axis_title(prim_labels[0]) if prim_labels else "Value"
+                    y_right = clean_axis_title(sec_choice)
                     ft_style(fig, x_title=x_name, y_title_left=y_left, y_title_right=y_right)
                 else:
                     fig = go.Figure()
