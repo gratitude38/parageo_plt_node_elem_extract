@@ -115,26 +115,51 @@ def invert_mapping(numbers: np.ndarray) -> Dict[int, int]:
 def find_mapping_keys(g: h5py.Group, container_name: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     keys = list(g.keys())
     topo_key = "Topology" if "Topology" in keys else None
+
     node_key = None
     elem_key = None
-    if container_name.lower() == "contact":
+    lname = (container_name or "").lower()
+
+    if lname == "contact":
         if "Contact Node number" in keys: node_key = "Contact Node number"
         if "Contact Element number" in keys: elem_key = "Contact Element number"
+        if node_key is None:
+            for k in keys:
+                if re.fullmatch(r"(?i)contact\s*node\s*number", k):
+                    node_key = k; break
+        if elem_key is None:
+            for k in keys:
+                if re.fullmatch(r"(?i)contact\s*element\s*number", k):
+                    elem_key = k; break
+
+    elif lname == "wells":
+        # Wells: nodes live in Well_nodes; element numbers may be absent
+        if "Well_nodes" in keys:
+            node_key = "Well_nodes"
+        else:
+            for k in keys:
+                if re.fullmatch(r"(?i)well[_\s]*nodes?", k):
+                    node_key = k; break
+        # try a normal element mapping if it exists; otherwise leave None
+        if "Element Numbers" in keys:
+            elem_key = "Element Numbers"
+        else:
+            for k in keys:
+                if re.fullmatch(r"(?i)element\s*numbers", k):
+                    elem_key = k; break
+
     else:
         if "Node Numbers" in keys: node_key = "Node Numbers"
         if "Element Numbers" in keys: elem_key = "Element Numbers"
-    if node_key is None:
-        for k in keys:
-            if container_name.lower() == "contact" and re.fullmatch(r"(?i)contact\s*node\s*number", k):
-                node_key = k; break
-            if container_name.lower() != "contact" and re.fullmatch(r"(?i)node\s*numbers", k):
-                node_key = k; break
-    if elem_key is None:
-        for k in keys:
-            if container_name.lower() == "contact" and re.fullmatch(r"(?i)contact\s*element\s*number", k):
-                elem_key = k; break
-            if container_name.lower() != "contact" and re.fullmatch(r"(?i)element\s*numbers", k):
-                elem_key = k; break
+        if node_key is None:
+            for k in keys:
+                if re.fullmatch(r"(?i)node\s*numbers", k):
+                    node_key = k; break
+        if elem_key is None:
+            for k in keys:
+                if re.fullmatch(r"(?i)element\s*numbers", k):
+                    elem_key = k; break
+
     return topo_key, node_key, elem_key
 
 def classify_variables(g: h5py.Group, node_count: int, elem_count: int, exclude: List[str]) -> Tuple[List[str], List[str]]:
@@ -582,10 +607,30 @@ def render_dump_main(entry: Dict[str, Any]):
 
             g = root[container][subgroup]
 
+            #topo_key, node_key, elem_key = find_mapping_keys(g, container_name=container)
+            #if not (node_key and elem_key):
+            #    st.error("Required mapping datasets not found (Node/Element Numbers).")
+            #    return
+
             topo_key, node_key, elem_key = find_mapping_keys(g, container_name=container)
-            if not (node_key and elem_key):
-                st.error("Required mapping datasets not found (Node/Element Numbers).")
+            # Node mapping must exist
+            if not node_key or node_key not in g:
+                st.error("Required node mapping not found.")
                 return
+            node_numbers = np.array(g[node_key]).astype(int).reshape(-1)
+
+            # Element mapping: use dataset if present; else synthesize for Wells
+            if elem_key and elem_key in g:
+                elem_numbers = np.array(g[elem_key]).astype(int).reshape(-1)
+            else:
+                if (container or "").lower() == "wells":
+                    # n = int(node_numbers.shape[0])
+                    # n nodes → n-1 elements: numbers 1..(n-1)
+                    elem_numbers = np.arange(1, int(node_numbers.shape[0]), dtype=int)
+                else:
+                    st.error("Element mapping missing.")
+                    return
+                
             node_numbers = np.array(g[node_key]).astype(int).reshape(-1)
             elem_numbers = np.array(g[elem_key]).astype(int).reshape(-1)
             node_inv = invert_mapping(node_numbers)
@@ -829,12 +874,32 @@ def render_dump_main(entry: Dict[str, Any]):
                             row = {lab: np.nan for lab in all_labels}
 
                             # mapping per file
+                            #topo2, node_key2, elem_key2 = find_mapping_keys(g2, container_name=container)
+                            #if not (node_key2 and elem_key2):
+                            #    x_vals.append(x_val); rows.append(row); continue
+                            #node_nums2 = np.array(g2[node_key2]).astype(int).reshape(-1)
+                            #elem_nums2 = np.array(g2[elem_key2]).astype(int).reshape(-1)
+                            #inv2 = invert_mapping(node_nums2 if mode=="Nodal" else elem_nums2)
+
+
                             topo2, node_key2, elem_key2 = find_mapping_keys(g2, container_name=container)
-                            if not (node_key2 and elem_key2):
+                            # Need nodes to proceed
+                            if not node_key2 or node_key2 not in g2:
                                 x_vals.append(x_val); rows.append(row); continue
                             node_nums2 = np.array(g2[node_key2]).astype(int).reshape(-1)
-                            elem_nums2 = np.array(g2[elem_key2]).astype(int).reshape(-1)
-                            inv2 = invert_mapping(node_nums2 if mode=="Nodal" else elem_nums2)
+                            
+                            # Elements: dataset if present; else synthesize for Wells
+                            if elem_key2 and elem_key2 in g2:
+                                elem_nums2 = np.array(g2[elem_key2]).astype(int).reshape(-1)
+                            elif (container or "").lower() == "wells":
+                                # n2 = int(node_nums2.shape[0])
+                                # n nodes → n-1 elements in this step
+                                elem_nums2 = np.arange(1, int(node_nums2.shape[0]), dtype=int)
+                            else:
+                                if mode == "Element":
+                                    x_vals.append(x_val); rows.append(row); continue
+                                elem_nums2 = np.array([], dtype=int)
+                            inv2 = invert_mapping(node_nums2 if mode == "Nodal" else elem_nums2)                            
 
                             # for each var/number get value
                             for var in sel_vars:
