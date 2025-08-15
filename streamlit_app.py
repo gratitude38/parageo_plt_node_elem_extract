@@ -306,20 +306,34 @@ else:
 active = files_sorted[st.session_state.active_index]
 
 # Top bar
+# cols = st.columns([1,1,5,3])
+# with cols[0]:
+#     if st.button("◀ Prev", use_container_width=True, key="prev_btn", disabled=st.session_state.active_index <= 0):
+#         st.session_state.active_index = max(0, st.session_state.active_index - 1)
+#         st.session_state.active_id = files_sorted[st.session_state.active_index].get("id")
+#         st.rerun()
+# with cols[1]:
+#     if st.button("Next ▶", use_container_width=True, key="next_btn", disabled=st.session_state.active_index >= len(files_sorted)-1):
+#         st.session_state.active_index = min(len(files_sorted)-1, st.session_state.active_index + 1)
+#         st.session_state.active_id = files_sorted[st.session_state.active_index].get("id")
+#         st.rerun()
+# with cols[2]:
+#     label = f"Step {active['step'] if active['step'] is not None else 'NA'} — {active['name']}"
+#     #st.markdown(f"### {label}")
+# with cols[3]:
+#     #labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']} ({e['id']})" for e in files_sorted]
+#     labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']}" for e in files_sorted]
+#     sel = st.selectbox("Jump to file", options=list(range(len(files_sorted))), format_func=lambda i: labels[i], index=st.session_state.active_index, key="jump_file")
+#     if sel != st.session_state.active_index:
+#         st.session_state.active_index = sel
+#         st.session_state.active_id = files_sorted[sel].get("id")
+#         st.rerun()
+# 
+# st.caption(f"Dump group: {active.get('dump_group')} | Step {active['step'] if active['step'] is not None else 'NA'} | Time: {active.get('time')} | File: {active.get('name')}")
+
+
+
 cols = st.columns([1,1,5,3])
-with cols[0]:
-    if st.button("◀ Prev", use_container_width=True, key="prev_btn", disabled=st.session_state.active_index <= 0):
-        st.session_state.active_index = max(0, st.session_state.active_index - 1)
-        st.session_state.active_id = files_sorted[st.session_state.active_index].get("id")
-        st.rerun()
-with cols[1]:
-    if st.button("Next ▶", use_container_width=True, key="next_btn", disabled=st.session_state.active_index >= len(files_sorted)-1):
-        st.session_state.active_index = min(len(files_sorted)-1, st.session_state.active_index + 1)
-        st.session_state.active_id = files_sorted[st.session_state.active_index].get("id")
-        st.rerun()
-with cols[2]:
-    label = f"Step {active['step'] if active['step'] is not None else 'NA'} — {active['name']}"
-    #st.markdown(f"### {label}")
 with cols[3]:
     #labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']} ({e['id']})" for e in files_sorted]
     labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']}" for e in files_sorted]
@@ -329,7 +343,19 @@ with cols[3]:
         st.session_state.active_id = files_sorted[sel].get("id")
         st.rerun()
 
-st.caption(f"Dump group: {active.get('dump_group')} | Step {active['step'] if active['step'] is not None else 'NA'} | Time: {active.get('time')} | File: {active.get('name')}")
+cols = st.columns([1,1,5,1.5,1.5])
+with cols[0]:
+    st.caption(f"Dump group: {active.get('dump_group')} | Step {active['step'] if active['step'] is not None else 'NA'} | Time: {active.get('time')} | File: {active.get('name')}")
+with cols[3]:
+    if st.button("◀ Prev", use_container_width=True, key="prev_btn", disabled=st.session_state.active_index <= 0):
+        st.session_state.active_index = max(0, st.session_state.active_index - 1)
+        st.session_state.active_id = files_sorted[st.session_state.active_index].get("id")
+        st.rerun()
+with cols[4]:
+    if st.button("Next ▶", use_container_width=True, key="next_btn", disabled=st.session_state.active_index >= len(files_sorted)-1):
+        st.session_state.active_index = min(len(files_sorted)-1, st.session_state.active_index + 1)
+        st.session_state.active_id = files_sorted[st.session_state.active_index].get("id")
+        st.rerun()
 
 # -----------------------------
 # Equations
