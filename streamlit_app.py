@@ -33,8 +33,7 @@ ss_default("desired_subgroup_map", {})         # {container -> subgroup}
 ss_default("part_choice_radio", "Dump")
 
 # Persistent store per logical group "container::subgroup" (normalized)
-# store[group] = {"mode": "Nodal"/"Element", "vars":[...], "nums":"1,2,3", "sec":"var/None", "comp":{var:int},
-#                 "overlay": {"on": bool, "ids": [file_ids...]}}
+# store[group] = {"mode": "Nodal"/"Element", "vars":[...], "nums":"1,2,3", "sec":"var/None", "comp":{var:int}}
 ss_default("store", {})
 # Which group is currently bound to the stable widgets
 ss_default("current_group_norm", None)
@@ -517,7 +516,7 @@ def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
         return False
 
 # -----------------------------
-# Dump: Main (stable widgets + per-group store + cross-time overlay)
+# Dump: Main (stable widgets + per-group store)
 # -----------------------------
 def render_dump_main(entry: Dict[str, Any]):
     path = entry["path"]
@@ -554,15 +553,13 @@ def render_dump_main(entry: Dict[str, Any]):
             # ---- normalized group key
             group_key_norm = f"{norm_name(container)}::{norm_name(subgroup)}"
             store: Dict[str, Dict[str, Any]] = st.session_state["store"]
-            rec = store.get(group_key_norm, {"mode":"Nodal","vars":[],"nums":"","sec":"None","comp":{}, "overlay":{"on": False, "ids": []}})
+            rec = store.get(group_key_norm, {"mode":"Nodal","vars":[],"nums":"","sec":"None","comp":{}})
 
             # ---- ALWAYS seed widgets if missing
             ss_default("mode_widget", rec["mode"])
             ss_default("vars_widget", list(rec["vars"]))
             ss_default("nums_widget", rec["nums"])
             ss_default("sec_widget",  rec["sec"])
-            ss_default("overlay_on_widget", rec.get("overlay", {}).get("on", False))
-            ss_default("overlay_steps_widget", rec.get("overlay", {}).get("ids", []))
 
             # ---- Load from store when group changes
             if st.session_state["current_group_norm"] != group_key_norm:
@@ -570,8 +567,6 @@ def render_dump_main(entry: Dict[str, Any]):
                 st.session_state["vars_widget"] = list(rec["vars"])
                 st.session_state["nums_widget"] = rec["nums"]
                 st.session_state["sec_widget"]  = rec["sec"]
-                st.session_state["overlay_on_widget"] = rec.get("overlay", {}).get("on", False)
-                st.session_state["overlay_steps_widget"] = rec.get("overlay", {}).get("ids", [])
                 st.session_state["current_group_norm"] = group_key_norm
 
             # Mode
@@ -599,24 +594,6 @@ def render_dump_main(entry: Dict[str, Any]):
                     st.session_state["sec_widget"] = "None"
                 st.selectbox("Secondary y-axis", sec_pool, key="sec_widget")
 
-            # ---------- Cross-time overlay controls ----------
-            # Build list of file IDs to show as options
-            all_ids = [e["id"] for e in files_sorted]
-            id_to_label = {e["id"]: f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']}" for e in files_sorted}
-            with st.container():
-                st.checkbox("Overlay across steps", key="overlay_on_widget", help="Plot the same selection across multiple time steps.")
-                if st.session_state["overlay_on_widget"]:
-                    # Default selection = all file IDs (once)
-                    if not st.session_state["overlay_steps_widget"]:
-                        st.session_state["overlay_steps_widget"] = list(all_ids)
-                    st.multiselect(
-                        "Steps to include",
-                        options=all_ids,
-                        default=st.session_state["overlay_steps_widget"],
-                        key="overlay_steps_widget",
-                        format_func=lambda fid: id_to_label.get(fid, fid),
-                    )
-
             if not sel_vars or not numbers_list:
                 st.info("Choose at least one variable and enter a list of numbers to plot.")
                 # Save current state
@@ -626,7 +603,6 @@ def render_dump_main(entry: Dict[str, Any]):
                     "nums": st.session_state["nums_widget"],
                     "sec":  st.session_state["sec_widget"],
                     "comp": store.get(group_key_norm, {}).get("comp", {}),
-                    "overlay": {"on": st.session_state["overlay_on_widget"], "ids": list(st.session_state["overlay_steps_widget"])},
                 }
                 st.session_state["store"] = store
                 return
@@ -654,7 +630,7 @@ def render_dump_main(entry: Dict[str, Any]):
                     st.number_input(f"{var}", min_value=0, max_value=comp_max, key=ck, step=1)
                     var_components[var] = int(st.session_state[ck])
 
-            # Map numbers -> internal IDs for current step
+            # Map numbers -> internal IDs
             inv = node_inv if mode == "Nodal" else elem_inv
             ids = [inv.get(n) for n in numbers_list]
             missing_nums = [n for n, i in zip(numbers_list, ids) if i is None]
@@ -662,115 +638,6 @@ def render_dump_main(entry: Dict[str, Any]):
             used_numbers = [n for n in numbers_list if inv.get(n) is not None]
             if missing_nums:
                 st.warning(f"Numbers not found and dropped: {missing_nums}")
-
-            # ---------- CROSS-TIME OVERLAY PLOT ----------
-            if st.session_state["overlay_on_widget"]:
-                sel_ids = [fid for fid in st.session_state["overlay_steps_widget"] if fid in all_ids]
-                sec_choice = st.session_state["sec_widget"]
-                sec_present_any = False
-                fig_ov = make_subplots(specs=[[{"secondary_y": sec_choice != 'None'}]])
-
-                # Build long table
-                first_col_name = "Node Number" if mode=="Nodal" else "Element Number"
-                rows = []
-
-                for fid in sel_ids:
-                    meta = next((e for e in files_sorted if e["id"] == fid), None)
-                    if meta is None or not meta.get("dump_group"):
-                        continue
-                    try:
-                        with h5py.File(meta["path"], "r") as f2:
-                            if meta["dump_group"] not in f2:
-                                continue
-                            root2 = f2[meta["dump_group"]]
-                            if container not in root2 or subgroup not in root2[container]:
-                                continue
-                            g2 = root2[container][subgroup]
-                            # Mappings
-                            topo2, node2, elem2 = find_mapping_keys(g2, container_name=container)
-                            if not (node2 and elem2):
-                                continue
-                            node_numbers2 = np.array(g2[node2]).astype(int).reshape(-1)
-                            elem_numbers2 = np.array(g2[elem2]).astype(int).reshape(-1)
-                            inv2 = invert_mapping(node_numbers2 if mode=="Nodal" else elem_numbers2)
-
-                            ids2 = [inv2.get(n) for n in numbers_list]
-                            used_nums2 = [n for n in numbers_list if inv2.get(n) is not None]
-                            ids2 = [i for i in ids2 if i is not None]
-                            if len(ids2) == 0 or len(used_nums2) == 0:
-                                continue
-
-                            # Labels and traces
-                            labels_map2 = {}
-                            for var in sel_vars:
-                                if var not in g2:  # variable missing in this step
-                                    continue
-                                arr = np.array(g2[var])
-                                if arr.ndim == 1:
-                                    vals = [arr[i] if i is not None and i < arr.shape[0] else np.nan for i in ids2]
-                                    label = var
-                                else:
-                                    comp = var_components.get(var, rec_comp.get(var, 0))
-                                    vals = [arr[i, comp] if i is not None and i < arr.shape[0] else np.nan for i in ids2]
-                                    label = f"{var} [comp {comp}]"
-                                vals = [float(np.array(v).item()) if v is not None and np.isfinite(v) else np.nan for v in vals]
-                                labels_map2[var] = label
-                                # collect rows for table
-                                rows.extend([{"Step": meta["step"], first_col_name: n, label: v} for n, v in zip(used_nums2, vals)])
-
-                            # Add traces for this step
-                            if st.session_state["sec_widget"] != "None" and st.session_state["sec_widget"] in labels_map2:
-                                sec_label = labels_map2[st.session_state["sec_widget"]]
-                                sec_present_any = True
-                            else:
-                                sec_label = None
-
-                            for var in sel_vars:
-                                if var not in labels_map2:
-                                    continue
-                                col = labels_map2[var]
-                                y = [r[col] for r in rows if r["Step"] == meta["step"] and col in r]
-                                x = [r[first_col_name] for r in rows if r["Step"] == meta["step"] and col in r]
-                                if sec_label and col == sec_label:
-                                    fig_ov.add_trace(go.Scattergl(x=x, y=y, mode="lines+markers", name=f"{col} — step {meta['step']}"), secondary_y=True)
-                                else:
-                                    fig_ov.add_trace(go.Scattergl(x=x, y=y, mode="lines+markers", name=f"{col} — step {meta['step']}"), secondary_y=False)
-
-                    except Exception:
-                        continue
-
-                y_left_title = ", ".join([v for v in sel_vars if v != st.session_state["sec_widget"]]) or "Value"
-                y_right_title = None
-                if st.session_state["sec_widget"] != "None" and sec_present_any:
-                    # Derive label text with comp if set; otherwise use the raw variable name
-                    y_right_title = f"{st.session_state['sec_widget']}"
-                ft_style(fig_ov, x_title=("Node Number" if mode=="Nodal" else "Element Number"),
-                         y_title_left=y_left_title, y_title_right=y_right_title)
-                st.plotly_chart(fig_ov, use_container_width=True)
-
-                # Overlay exports
-                html_bytes_ov = fig_ov.to_html(include_plotlyjs="cdn").encode("utf-8")
-                st.download_button("Download overlay plot (HTML)", data=html_bytes_ov, file_name="overlay_plot.html", mime="text/html")
-                try:
-                    png_bytes_ov = fig_ov.to_image(format="png", scale=2)  # needs kaleido
-                    st.download_button("Download overlay plot (PNG)", data=png_bytes_ov, file_name="overlay_plot.png", mime="image/png")
-                except Exception:
-                    st.caption("Overlay PNG export unavailable (kaleido not installed in this runtime).")
-
-                # Overlay table (wide per variable; merge rows by Step & Entity)
-                if rows:
-                    # Merge rows into a wide table
-                    df_overlay = pd.DataFrame(rows)
-                    # If multiple variables, rows will have separate columns; forward-fill via groupby/pivot
-                    value_cols = [c for c in df_overlay.columns if c not in {"Step", "Node Number", "Element Number"}]
-                    id_col = "Node Number" if mode=="Nodal" else "Element Number"
-                    # Sometimes rows may repeat per var; aggregate by mean
-                    df_overlay = df_overlay.groupby(["Step", id_col], as_index=False).mean(numeric_only=True)
-                    st.dataframe(df_overlay, use_container_width=True)
-                    st.download_button("Download overlay table (CSV)", data=df_overlay.to_csv(index=False).encode("utf-8"),
-                                       file_name="overlay_table.csv", mime="text/csv")
-
-            # ---------- Single-step plot (original) ----------
             if len(ids) == 0 or len(used_numbers) == 0:
                 fig = go.Figure()
                 fig.add_annotation(text="No valid numbers in this step for the current selection",
@@ -786,12 +653,15 @@ def render_dump_main(entry: Dict[str, Any]):
                     "nums": st.session_state["nums_widget"],
                     "sec":  st.session_state["sec_widget"],
                     "comp": {**rec_comp, **{v: var_components.get(v, rec_comp.get(v, 0)) for v in sel_vars}},
-                    "overlay": {"on": st.session_state["overlay_on_widget"], "ids": list(st.session_state["overlay_steps_widget"])},
                 }
                 st.session_state["store"] = store
                 return
 
-            # Build DF for current step
+            # Build DF
+            missing_vars = [v for v in sel_vars if v not in g]
+            if missing_vars:
+                st.info(f"Variables missing in this step: {missing_vars}")
+
             first_col_name = "Node Number" if mode=="Nodal" else "Element Number"
             df = pd.DataFrame({first_col_name: used_numbers})
             labels_map = {}
@@ -810,12 +680,14 @@ def render_dump_main(entry: Dict[str, Any]):
                 df[label] = vals
                 labels_map[var] = label
 
-            # Plot (single-step)
+            # Plot
             sec_choice = st.session_state["sec_widget"]
             sec_present = (sec_choice != "None") and (sec_choice in labels_map)
+            if sec_choice != "None" and not sec_present:
+                st.info(f"Secondary axis variable '{sec_choice}' is missing in this step and will be ignored.")
 
             if sec_present:
-                sec_label = labels_map.get(sec_choice)
+                sec_label = labels_map[sec_choice]
                 fig = make_subplots(specs=[[{"secondary_y": True}]])
                 prim_labels = []
                 for var in sel_vars:
@@ -844,7 +716,7 @@ def render_dump_main(entry: Dict[str, Any]):
 
             st.plotly_chart(fig, use_container_width=True)
 
-            # Exports (single-step)
+            # Exports
             html_bytes = fig.to_html(include_plotlyjs="cdn").encode("utf-8")
             st.download_button("Download plot (HTML)", data=html_bytes, file_name="plot.html", mime="text/html")
             try:
@@ -853,7 +725,7 @@ def render_dump_main(entry: Dict[str, Any]):
             except Exception:
                 st.caption("PNG export unavailable (kaleido not installed in this runtime).")
 
-            # Table (single-step)
+            # Table
             st.dataframe(df, use_container_width=True)
             st.download_button("Download table (CSV)", data=df.to_csv(index=False).encode("utf-8"), file_name="table.csv", mime="text/csv")
 
@@ -864,7 +736,6 @@ def render_dump_main(entry: Dict[str, Any]):
                 "nums": st.session_state["nums_widget"],
                 "sec":  st.session_state["sec_widget"],
                 "comp": {**rec_comp, **{v: var_components.get(v, rec_comp.get(v, 0)) for v in sel_vars}},
-                "overlay": {"on": st.session_state["overlay_on_widget"], "ids": list(st.session_state["overlay_steps_widget"])},
             }
             st.session_state["store"] = store
 
