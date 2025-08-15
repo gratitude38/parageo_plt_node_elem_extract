@@ -10,7 +10,7 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="HDF5 .plt Viewer (FEM, Plotly)", layout="wide")
+st.set_page_config(page_title="ParaGeo .plt visualiser", layout="wide")
 
 # -----------------------------
 # Session defaults
@@ -219,7 +219,7 @@ with st.sidebar:
     st.header("Data")
     uploads = st.file_uploader(
         "Drop `.plt` files",
-        type=["plt", "h5", "hdf5"],
+        type=["plt"],
         accept_multiple_files=True,
         help="Each file is one time step; filename suffix like `_002.plt` is used for ordering.",
         key=f"uploader_{st.session_state.upload_key}",
