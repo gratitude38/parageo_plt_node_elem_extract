@@ -16,7 +16,7 @@ from plotly.subplots import make_subplots
 st.set_page_config(page_title="HDF5 .plt Viewer (FEM, Plotly)", layout="wide")
 
 # =========================
-# Session init (global intent + stable widget keys)
+# Session init (global intent + stable widgets + persistent store)
 # =========================
 def _ss_default(key, value):
     if key not in st.session_state:
@@ -32,8 +32,14 @@ _ss_default("flash_msg", None)
 _ss_default("desired_container", None)          # global container name (string)
 _ss_default("desired_subgroup_map", {})         # per-container subgroup: {container -> subgroup}
 
-# Stable section choice
+# Section choice
 _ss_default("part_choice_radio", "Dump")
+
+# Persistent store of selections per logical group (normalized "container::subgroup")
+# store[group_key_norm] = {"mode": "Nodal"/"Element", "vars": [...], "nums": "1,2,3", "sec": "var or None", "comp": {var:int}}
+_ss_default("store", {})
+# Track which group is currently bound to the stable widgets (so we only load when this changes)
+_ss_default("current_group_norm", None)
 
 # =========================
 # Helpers
@@ -98,9 +104,6 @@ def extract_step_from_filename(name: str) -> Optional[int]:
         except Exception:
             pass
     return None
-
-def list_groups(h: h5py.Group) -> List[str]:
-    return [k for k, v in h.items() if isinstance(v, h5py.Group)]
 
 def invert_mapping(numbers: np.ndarray) -> Dict[int, int]:
     inv = {}
@@ -525,7 +528,7 @@ def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
         return False
 
 # =========================
-# Dump: Main
+# Dump: Main (stable widgets + per-group store)
 # =========================
 def render_dump_main(entry: Dict[str, Any]):
     path = entry["path"]
@@ -560,30 +563,29 @@ def render_dump_main(entry: Dict[str, Any]):
             exclude = [k for k in [topo_key, node_key, elem_key] if k]
             nodal_vars, elem_vars = classify_variables(g, node_count=num_nodes, elem_count=num_elems, exclude=exclude)
 
-            # ---- Stable, normalized group key for ALL widget state ----
+            # ---- Stable, normalized group key for ALL persistence ----
             group_key_norm = f"{norm_name(container)}::{norm_name(subgroup)}"
+            store: Dict[str, Dict[str, Any]] = st.session_state["store"]
 
-            # Mode (radio) — seed once, never override
-            mode_key = f"mode::{group_key_norm}"
-            if mode_key not in st.session_state:
-                st.session_state[mode_key] = "Nodal"
-            st.radio("Variable type", ["Nodal", "Element"], key=mode_key, horizontal=True)
-            mode = st.session_state[mode_key]
+            # If this is a different group than last render, load store -> stable widgets
+            if st.session_state["current_group_norm"] != group_key_norm:
+                rec = store.get(group_key_norm, {"mode": "Nodal", "vars": [], "nums": "", "sec": "None", "comp": {}})
+                # seed stable widgets from store record (do not override later)
+                _ss_default("mode_widget", rec["mode"])
+                _ss_default("vars_widget", list(rec["vars"]))
+                _ss_default("nums_widget", rec["nums"])
+                _ss_default("sec_widget", rec["sec"])
+                # components are seeded lazily per var below
+                st.session_state["current_group_norm"] = group_key_norm
+
+            # Determine available options for current mode
+            # Mode
+            st.radio("Variable type", ["Nodal", "Element"], key="mode_widget", horizontal=True)
+            mode = st.session_state["mode_widget"]
             var_options_available = nodal_vars if mode == "Nodal" else elem_vars
 
-            # Vars / Numbers / Secondary — seed once, never override
-            vars_key = f"vars::{group_key_norm}::{mode}"
-            nums_key = f"nums::{group_key_norm}::{mode}"
-            sec_key  = f"sec::{group_key_norm}::{mode}"
-            if vars_key not in st.session_state:
-                st.session_state[vars_key] = []
-            if nums_key not in st.session_state:
-                st.session_state[nums_key] = ""
-            if sec_key not in st.session_state:
-                st.session_state[sec_key] = "None"
-
-            # ---- Union options to keep your selections even if missing this step ----
-            selected_names = list(st.session_state[vars_key])  # do not filter here
+            # Variables — union options to avoid drops if missing this step
+            selected_names = list(st.session_state["vars_widget"])
             union_options = sorted(set(var_options_available).union(selected_names))
 
             def labelize(name: str) -> str:
@@ -594,26 +596,35 @@ def render_dump_main(entry: Dict[str, Any]):
                 st.multiselect(
                     "Variables",
                     options=union_options,
-                    key=vars_key,
-                    format_func=labelize,  # show "(missing...)" but keep raw value in state
+                    key="vars_widget",
+                    format_func=labelize,
                 )
-                sel_vars = list(st.session_state[vars_key])
+                sel_vars = list(st.session_state["vars_widget"])
             with c_nums:
                 label_numbers = "Enter nodal NUMBERS (not IDs)" if mode=="Nodal" else "Enter element NUMBERS (not IDs)"
-                st.text_input(label_numbers, key=nums_key, placeholder="e.g., 1,2,3-10")
-                numbers_list = parse_int_list(st.session_state[nums_key])
+                st.text_input(label_numbers, key="nums_widget", placeholder="e.g., 1,2,3-10")
+                numbers_list = parse_int_list(st.session_state["nums_widget"])
             with c_sec:
-                # Secondary pool = selected names only (even if currently missing)
                 sec_pool = ["None"] + (sel_vars if sel_vars else [])
-                if st.session_state[sec_key] not in sec_pool:
-                    st.session_state[sec_key] = "None"
-                st.selectbox("Secondary y-axis", sec_pool, key=sec_key)
+                if st.session_state["sec_widget"] not in sec_pool:
+                    st.session_state["sec_widget"] = "None"
+                st.selectbox("Secondary y-axis", sec_pool, key="sec_widget")
 
             if not sel_vars or not numbers_list:
                 st.info("Choose at least one variable and enter a list of numbers to plot.")
+                # Save current state to store before returning
+                store[group_key_norm] = {
+                    "mode": st.session_state["mode_widget"],
+                    "vars": list(st.session_state["vars_widget"]),
+                    "nums": st.session_state["nums_widget"],
+                    "sec": st.session_state["sec_widget"],
+                    "comp": store.get(group_key_norm, {}).get("comp", {}),
+                }
+                st.session_state["store"] = store
                 return
 
-            # Components (per normalized group+var) — only for variables actually present and vector-valued
+            # Components (only for variables present & vector-valued)
+            rec_comp = store.get(group_key_norm, {}).get("comp", {})
             var_components = {}
             vecs = []
             for var in sel_vars:
@@ -628,9 +639,9 @@ def render_dump_main(entry: Dict[str, Any]):
                 comp_cols = []
             for (var, comp_max), col in zip(vecs, comp_cols):
                 with col:
-                    ck = f"comp::{group_key_norm}::{var}"
+                    ck = f"comp_widget::{var}"  # stable per var label
                     if ck not in st.session_state:
-                        st.session_state[ck] = 0
+                        st.session_state[ck] = int(rec_comp.get(var, 0))
                     st.session_state[ck] = max(0, min(int(st.session_state[ck]), comp_max))
                     st.number_input(f"{var}", min_value=0, max_value=comp_max, key=ck, step=1)
                     var_components[var] = int(st.session_state[ck])
@@ -651,6 +662,15 @@ def render_dump_main(entry: Dict[str, Any]):
                 st.plotly_chart(fig, use_container_width=True)
                 status_df = pd.DataFrame({"requested": numbers_list, "found": [n in used_numbers for n in numbers_list]})
                 st.dataframe(status_df, use_container_width=True)
+                # Save current state to store
+                store[group_key_norm] = {
+                    "mode": st.session_state["mode_widget"],
+                    "vars": list(st.session_state["vars_widget"]),
+                    "nums": st.session_state["nums_widget"],
+                    "sec": st.session_state["sec_widget"],
+                    "comp": {**rec_comp, **{v: var_components.get(v, rec_comp.get(v, 0)) for v in sel_vars}},
+                }
+                st.session_state["store"] = store
                 return
 
             # Build DataFrame
@@ -669,7 +689,7 @@ def render_dump_main(entry: Dict[str, Any]):
                     vals = [arr[i] if i is not None and i < arr.shape[0] else np.nan for i in ids]
                     label = var
                 else:
-                    comp = var_components.get(var, 0)
+                    comp = var_components.get(var, rec_comp.get(var, 0))
                     vals = [arr[i, comp] if i is not None and i < arr.shape[0] else np.nan for i in ids]
                     label = f"{var} [comp {comp}]"
                 clean = []
@@ -682,7 +702,7 @@ def render_dump_main(entry: Dict[str, Any]):
                 labels_map[var] = label
 
             # Plot
-            sec_choice = st.session_state[sec_key]
+            sec_choice = st.session_state["sec_widget"]
             sec_present = (sec_choice != "None") and (sec_choice in labels_map)
 
             if sec_choice != "None" and not sec_present:
@@ -730,6 +750,16 @@ def render_dump_main(entry: Dict[str, Any]):
             # Table
             st.dataframe(df, use_container_width=True)
             st.download_button("Download table (CSV)", data=df.to_csv(index=False).encode("utf-8"), file_name="table.csv", mime="text/csv")
+
+            # ---- Save current state to store (single source of truth) ----
+            store[group_key_norm] = {
+                "mode": st.session_state["mode_widget"],
+                "vars": list(st.session_state["vars_widget"]),
+                "nums": st.session_state["nums_widget"],
+                "sec": st.session_state["sec_widget"],
+                "comp": {**rec_comp, **{v: var_components.get(v, rec_comp.get(v, 0)) for v in sel_vars}},
+            }
+            st.session_state["store"] = store
 
     except Exception as e:
         st.error(f"Dump read error: {e}")
