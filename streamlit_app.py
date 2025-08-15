@@ -319,7 +319,7 @@ with cols[1]:
         st.rerun()
 with cols[2]:
     label = f"Step {active['step'] if active['step'] is not None else 'NA'} — {active['name']}"
-    st.markdown(f"### {label}")
+    #st.markdown(f"### {label}")
 with cols[3]:
     labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']} ({e['id']})" for e in files_sorted]
     sel = st.selectbox("Jump to file", options=list(range(len(files_sorted))), format_func=lambda i: labels[i], index=st.session_state.active_index, key="jump_file")
@@ -328,7 +328,7 @@ with cols[3]:
         st.session_state.active_id = files_sorted[sel].get("id")
         st.rerun()
 
-st.caption(f"Dump group: {active.get('dump_group')} | Time: {active.get('time')} | File: {active.get('name')}")
+st.caption(f"Dump group: {active.get('dump_group')} | Step {active['step'] if active['step'] is not None else 'NA'} | Time: {active.get('time')} | File: {active.get('name')}")
 
 # -----------------------------
 # Equations
