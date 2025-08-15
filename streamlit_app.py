@@ -326,13 +326,13 @@ if st.session_state.active_id is not None:
     except StopIteration:
         st.session_state.active_index = 0
 else:
-    st.subheader("Spatial distribution (for a fixed time)")
     st.session_state.active_index = 0
     st.session_state.active_id = files_sorted[0]["id"]
 
 active = files_sorted[st.session_state.active_index]
 
 # Top bar
+st.subheader("Spatial distribution (for a fixed time)")
 cols = st.columns([1,1,5,3])
 with cols[0]:
     if st.button("◀ Prev", use_container_width=True, key="prev_btn", disabled=st.session_state.active_index <= 0):
