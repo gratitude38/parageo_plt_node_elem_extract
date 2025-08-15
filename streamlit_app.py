@@ -732,12 +732,15 @@ def render_dump_main(entry: Dict[str, Any]):
                 def trace_label(var: str, n: int, comp_map: Dict[str,int]) -> str:
                     if var in g and np.array(g[var]).ndim >= 2 and np.array(g[var]).shape[1] > 1:
                         cidx = comp_map.get(var, rec_comp.get(var, 0))
-                        return f"{var} [comp {cidx}] @ {mode_label} {n}"
+                        #return f"{var} [comp {cidx}] @ {mode_label} {n}"
+                        return f"{var} [comp {cidx}] {n}"
                     elif var in g and np.array(g[var]).ndim == 1:
-                        return f"{var} @ {mode_label} {n}"
+                        #return f"{var} @ {mode_label} {n}"
+                        return f"{var} {n}"
                     else:
                         # unknown shape in this step → still keep a generic label
-                        return f"{var} @ {mode_label} {n}"
+                        # return f"{var} @ {mode_label} {n}"
+                        return f"{var} {n}"
 
                 all_labels = [trace_label(v, n, var_components) for v in sel_vars for n in numbers_list]
                 x_vals: List[float] = []
@@ -848,7 +851,8 @@ def render_dump_main(entry: Dict[str, Any]):
                     for c in data_cols:
                         if is_sec_label(c):
                             fig.add_trace(go.Scattergl(x=df_ts[x_name], y=df_ts[c], mode="lines+markers", name=f"{c} (right)"), secondary_y=True)
-                    y_left = ", ".join(prim_labels) if prim_labels else "Value"
+                    # y_left = ", ".join(prim_labels) if prim_labels else "Value"
+                    y_left = prim_labels[0]
                     y_right = sec_choice
                     ft_style(fig, x_title=x_name, y_title_left=y_left, y_title_right=y_right)
                 else:
