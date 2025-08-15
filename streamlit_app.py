@@ -38,6 +38,9 @@ _ss_default("part_choice_radio", "Dump")
 # =========================
 # Helpers
 # =========================
+def norm_name(s: str) -> str:
+    return re.sub(r"\s+", " ", str(s)).strip().lower()
+
 def bytes_to_str(x):
     if isinstance(x, (bytes, bytearray, np.bytes_, np.void)):
         try:
@@ -346,7 +349,6 @@ def render_equations(entry: Dict[str, Any]):
                 st.info("No items under 'Equations'."); return
             c1, c2 = st.columns([1,2])
             with c1:
-                # Seed once
                 if "eq_item" not in st.session_state:
                     st.session_state["eq_item"] = items[0]
                 idx = items.index(st.session_state["eq_item"]) if st.session_state["eq_item"] in items else 0
@@ -558,21 +560,21 @@ def render_dump_main(entry: Dict[str, Any]):
             exclude = [k for k in [topo_key, node_key, elem_key] if k]
             nodal_vars, elem_vars = classify_variables(g, node_count=num_nodes, elem_count=num_elems, exclude=exclude)
 
-            # Per group persistent keys (NO defaults on rerun)
-            group_key = f"{container}::{subgroup}"
+            # ---- Stable, normalized group key for ALL widget state ----
+            group_key_norm = f"{norm_name(container)}::{norm_name(subgroup)}"
 
-            # Mode (radio) — seed once
-            mode_key = f"mode::{group_key}"
+            # Mode (radio) — seed once, never override
+            mode_key = f"mode::{group_key_norm}"
             if mode_key not in st.session_state:
                 st.session_state[mode_key] = "Nodal"
             st.radio("Variable type", ["Nodal", "Element"], key=mode_key, horizontal=True)
             mode = st.session_state[mode_key]
             var_options = nodal_vars if mode == "Nodal" else elem_vars
 
-            # Vars / Numbers / Secondary — seed once
-            vars_key = f"vars::{group_key}::{mode}"
-            nums_key = f"nums::{group_key}::{mode}"
-            sec_key  = f"sec::{group_key}::{mode}"
+            # Vars / Numbers / Secondary — seed once, never override
+            vars_key = f"vars::{group_key_norm}::{mode}"
+            nums_key = f"nums::{group_key_norm}::{mode}"
+            sec_key  = f"sec::{group_key_norm}::{mode}"
             if vars_key not in st.session_state:
                 st.session_state[vars_key] = []
             if nums_key not in st.session_state:
@@ -582,19 +584,16 @@ def render_dump_main(entry: Dict[str, Any]):
 
             c_vars, c_nums, c_sec = st.columns([2,2,1])
             with c_vars:
-                # do NOT pass default each rerun; rely on key only
+                # rely only on the key; do not pass defaults on each rerun
                 st.multiselect("Variables", var_options, key=vars_key)
                 sel_vars = [v for v in st.session_state[vars_key] if v in var_options]
-                # ensure state drops unavailable vars silently
-                if set(sel_vars) != set(st.session_state[vars_key]):
-                    st.session_state[vars_key] = sel_vars
+                # Do NOT overwrite state here; let Streamlit reconcile across files
             with c_nums:
                 label_numbers = "Enter nodal NUMBERS (not IDs)" if mode=="Nodal" else "Enter element NUMBERS (not IDs)"
                 st.text_input(label_numbers, key=nums_key, placeholder="e.g., 1,2,3-10")
                 numbers_list = parse_int_list(st.session_state[nums_key])
             with c_sec:
                 sec_pool = ["None"] + (sel_vars if sel_vars else [])
-                # If stored secondary not valid anymore, reset to None (once)
                 if st.session_state[sec_key] not in sec_pool:
                     st.session_state[sec_key] = "None"
                 st.selectbox("Secondary y-axis", sec_pool, key=sec_key)
@@ -603,9 +602,8 @@ def render_dump_main(entry: Dict[str, Any]):
                 st.info("Choose at least one variable and enter a list of numbers to plot.")
                 return
 
-            # Components (per group+var) — seed once per var
+            # Components (per normalized group+var) — seed once
             var_components = {}
-            comp_cols = None
             vecs = []
             for var in sel_vars:
                 arr = np.array(g[var])
@@ -614,12 +612,13 @@ def render_dump_main(entry: Dict[str, Any]):
             if vecs:
                 st.markdown("**Components**")
                 comp_cols = st.columns(len(vecs))
-            for (var, comp_max), col in zip(vecs, comp_cols or []):
+            else:
+                comp_cols = []
+            for (var, comp_max), col in zip(vecs, comp_cols):
                 with col:
-                    ck = f"comp::{group_key}::{var}"
+                    ck = f"comp::{group_key_norm}::{var}"
                     if ck not in st.session_state:
                         st.session_state[ck] = 0
-                    # clamp stored value if needed
                     st.session_state[ck] = max(0, min(int(st.session_state[ck]), comp_max))
                     st.number_input(f"{var}", min_value=0, max_value=comp_max, key=ck, step=1)
                     var_components[var] = int(st.session_state[ck])
