@@ -10,40 +10,37 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# =========================
-# App config
-# =========================
 st.set_page_config(page_title="HDF5 .plt Viewer (FEM, Plotly)", layout="wide")
 
-# =========================
-# Session init (global intent + stable widgets + persistent store)
-# =========================
-def _ss_default(key, value):
+# -----------------------------
+# Session defaults
+# -----------------------------
+def ss_default(key, value):
     if key not in st.session_state:
         st.session_state[key] = value
 
-_ss_default("upload_key", 0)
-_ss_default("active_id", None)
-_ss_default("files", [])                 # entries: {id,name,path,step,dump_group,time}
-_ss_default("active_index", 0)
-_ss_default("flash_msg", None)
+ss_default("upload_key", 0)
+ss_default("active_id", None)
+ss_default("files", [])                 # list of {id,name,path,step,dump_group,time}
+ss_default("active_index", 0)
+ss_default("flash_msg", None)
 
-# User intent (LOCKED across files unless user changes)
-_ss_default("desired_container", None)          # global container name (string)
-_ss_default("desired_subgroup_map", {})         # per-container subgroup: {container -> subgroup}
+# Global intent (locked unless user changes)
+ss_default("desired_container", None)          # string
+ss_default("desired_subgroup_map", {})         # {container -> subgroup}
 
 # Section choice
-_ss_default("part_choice_radio", "Dump")
+ss_default("part_choice_radio", "Dump")
 
-# Persistent store of selections per logical group (normalized "container::subgroup")
-# store[group_key_norm] = {"mode": "Nodal"/"Element", "vars": [...], "nums": "1,2,3", "sec": "var or None", "comp": {var:int}}
-_ss_default("store", {})
-# Track which group is currently bound to the stable widgets (so we only load when this changes)
-_ss_default("current_group_norm", None)
+# Persistent store per logical group "container::subgroup" (normalized)
+# store[group] = {"mode": "Nodal"/"Element", "vars":[...], "nums":"1,2,3", "sec":"var/None", "comp":{var:int}}
+ss_default("store", {})
+# Which group is currently bound to the stable widgets
+ss_default("current_group_norm", None)
 
-# =========================
+# -----------------------------
 # Helpers
-# =========================
+# -----------------------------
 def norm_name(s: str) -> str:
     return re.sub(r"\s+", " ", str(s)).strip().lower()
 
@@ -116,7 +113,6 @@ def invert_mapping(numbers: np.ndarray) -> Dict[int, int]:
     return inv
 
 def find_mapping_keys(g: h5py.Group, container_name: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Return (topology_key, node_map_key, elem_map_key) based on container."""
     keys = list(g.keys())
     topo_key = "Topology" if "Topology" in keys else None
     node_key = None
@@ -127,7 +123,6 @@ def find_mapping_keys(g: h5py.Group, container_name: str) -> Tuple[Optional[str]
     else:
         if "Node Numbers" in keys: node_key = "Node Numbers"
         if "Element Numbers" in keys: elem_key = "Element Numbers"
-    # case-insensitive fallbacks
     if node_key is None:
         for k in keys:
             if container_name.lower() == "contact" and re.fullmatch(r"(?i)contact\s*node\s*number", k):
@@ -149,10 +144,10 @@ def classify_variables(g: h5py.Group, node_count: int, elem_count: int, exclude:
             continue
         if k in exclude:
             continue
-        shape = v.shape
-        if len(shape) == 0:
+        shp = v.shape
+        if len(shp) == 0:
             continue
-        n0 = shape[0]
+        n0 = shp[0]
         if n0 == node_count:
             nodal.append(k)
         elif n0 == elem_count:
@@ -217,9 +212,9 @@ def ci_match(name: Optional[str], options: List[str]) -> Optional[str]:
             return o
     return None
 
-# =========================
-# Sidebar: upload + view
-# =========================
+# -----------------------------
+# Sidebar: upload + housekeeping
+# -----------------------------
 with st.sidebar:
     st.header("Data")
     uploads = st.file_uploader(
@@ -229,7 +224,6 @@ with st.sidebar:
         help="Each file is one time step; filename suffix like `_002.plt` is used for ordering.",
         key=f"uploader_{st.session_state.upload_key}",
     )
-
     if uploads:
         added_ids = []
         for uf in uploads:
@@ -262,7 +256,7 @@ with st.sidebar:
     if st.session_state.files:
         st.subheader("Sources")
         c1, c2 = st.columns(2)
-        if c1.button("Remove current file", help="Remove the active file"):
+        if c1.button("Remove current file"):
             if st.session_state.active_id is not None:
                 st.session_state.files = [x for x in st.session_state.files if x["id"] != st.session_state.active_id]
                 if st.session_state.files:
@@ -271,7 +265,7 @@ with st.sidebar:
                 else:
                     st.session_state.active_id = None
             st.rerun()
-        if c2.button("Remove all files", help="Remove all files"):
+        if c2.button("Remove all files"):
             st.session_state.files = []
             st.session_state.active_id = None
             st.session_state.upload_key += 1
@@ -287,12 +281,13 @@ with st.sidebar:
         help="Only one section shown at a time.",
     )
 
-# Guard if nothing loaded
+# -----------------------------
+# Active file selection
+# -----------------------------
 if not st.session_state.files:
     st.info("No files loaded yet. Use the sidebar to drop `.plt` files.")
     st.stop()
 
-# Sort & pick active file
 def sort_key(entry):
     s = entry["step"]
     return (999999 if s is None else int(s), entry["name"])
@@ -310,9 +305,7 @@ else:
 
 active = files_sorted[st.session_state.active_index]
 
-# =========================
-# Top bar navigation
-# =========================
+# Top bar
 cols = st.columns([1,1,5,3])
 with cols[0]:
     if st.button("◀ Prev", use_container_width=True, key="prev_btn", disabled=st.session_state.active_index <= 0):
@@ -337,9 +330,9 @@ with cols[3]:
 
 st.caption(f"Dump group: {active.get('dump_group')} | Time: {active.get('time')} | File: {active.get('name')}")
 
-# =========================
+# -----------------------------
 # Equations
-# =========================
+# -----------------------------
 def render_equations(entry: Dict[str, Any]):
     path = entry["path"]
     try:
@@ -392,9 +385,9 @@ def render_equations(entry: Dict[str, Any]):
     except Exception as e:
         st.error(f"Equations read error: {e}")
 
-# =========================
-# Materials (single Name/Value table)
-# =========================
+# -----------------------------
+# Materials
+# -----------------------------
 def render_materials(entry: Dict[str, Any]):
     path = entry["path"]
     try:
@@ -436,27 +429,23 @@ def render_materials(entry: Dict[str, Any]):
     except Exception as e:
         st.error(f"Materials read error: {e}")
 
-# =========================
-# Dump: Sidebar (LOCK selection unless user changes)
-# =========================
+# -----------------------------
+# Dump: Sidebar (lock selections)
+# -----------------------------
 def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
-    """Container/Subgroup are global user intent. Do not change them automatically across files."""
     path = entry["path"]
     dump_group = entry["dump_group"]
-
     try:
         with h5py.File(path, "r") as f:
             if not dump_group or dump_group not in f:
                 st.sidebar.info("This file has no Dump_* group.")
                 return False
-
             root = f[dump_group]
             containers = [key_to_str(k) for k, v in root.items() if isinstance(v, h5py.Group)]
             if not containers:
                 st.sidebar.info("Dump group has no containers.")
                 return False
 
-            # --- Container selection (only seed once) ---
             desired_container = st.session_state.get("desired_container")
             if desired_container is None:
                 st.session_state["desired_container"] = containers[0]
@@ -464,7 +453,7 @@ def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
 
             matched_container = ci_match(desired_container, containers)
             if matched_container is None:
-                st.sidebar.warning(f"Selected container '{desired_container}' is not available in this file.")
+                st.sidebar.warning(f"Container '{desired_container}' not in this file.")
                 pick_key = "container_pick_tmp"
                 if pick_key not in st.session_state:
                     st.session_state[pick_key] = containers[0]
@@ -483,7 +472,6 @@ def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
                 if sel != desired_container:
                     st.session_state["desired_container"] = sel
 
-            # --- Subgroup selection (per-container; seed once) ---
             container = st.session_state["desired_container"]
             grp = root[container]
             subgroups = [key_to_str(k) for k, v in grp.items() if isinstance(v, h5py.Group)]
@@ -527,9 +515,9 @@ def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
         st.sidebar.error(f"Dump navigation error: {e}")
         return False
 
-# =========================
+# -----------------------------
 # Dump: Main (stable widgets + per-group store)
-# =========================
+# -----------------------------
 def render_dump_main(entry: Dict[str, Any]):
     path = entry["path"]
     dump_group = entry["dump_group"]
@@ -549,7 +537,6 @@ def render_dump_main(entry: Dict[str, Any]):
 
             g = root[container][subgroup]
 
-            # Mapping datasets
             topo_key, node_key, elem_key = find_mapping_keys(g, container_name=container)
             if not (node_key and elem_key):
                 st.error("Required mapping datasets not found (Node/Element Numbers).")
@@ -563,42 +550,39 @@ def render_dump_main(entry: Dict[str, Any]):
             exclude = [k for k in [topo_key, node_key, elem_key] if k]
             nodal_vars, elem_vars = classify_variables(g, node_count=num_nodes, elem_count=num_elems, exclude=exclude)
 
-            # ---- Stable, normalized group key for ALL persistence ----
+            # ---- normalized group key
             group_key_norm = f"{norm_name(container)}::{norm_name(subgroup)}"
             store: Dict[str, Dict[str, Any]] = st.session_state["store"]
+            rec = store.get(group_key_norm, {"mode":"Nodal","vars":[],"nums":"","sec":"None","comp":{}})
 
-            # If this is a different group than last render, load store -> stable widgets
+            # ---- ALWAYS seed widgets if missing
+            ss_default("mode_widget", rec["mode"])
+            ss_default("vars_widget", list(rec["vars"]))
+            ss_default("nums_widget", rec["nums"])
+            ss_default("sec_widget",  rec["sec"])
+
+            # ---- Load from store when group changes
             if st.session_state["current_group_norm"] != group_key_norm:
-                rec = store.get(group_key_norm, {"mode": "Nodal", "vars": [], "nums": "", "sec": "None", "comp": {}})
-                # seed stable widgets from store record (do not override later)
-                _ss_default("mode_widget", rec["mode"])
-                _ss_default("vars_widget", list(rec["vars"]))
-                _ss_default("nums_widget", rec["nums"])
-                _ss_default("sec_widget", rec["sec"])
-                # components are seeded lazily per var below
+                st.session_state["mode_widget"] = rec["mode"]
+                st.session_state["vars_widget"] = list(rec["vars"])
+                st.session_state["nums_widget"] = rec["nums"]
+                st.session_state["sec_widget"]  = rec["sec"]
                 st.session_state["current_group_norm"] = group_key_norm
 
-            # Determine available options for current mode
             # Mode
-            st.radio("Variable type", ["Nodal", "Element"], key="mode_widget", horizontal=True)
+            st.radio("Variable type", ["Nodal","Element"], key="mode_widget", horizontal=True)
             mode = st.session_state["mode_widget"]
-            var_options_available = nodal_vars if mode == "Nodal" else elem_vars
+            var_options_avail = nodal_vars if mode == "Nodal" else elem_vars
 
-            # Variables — union options to avoid drops if missing this step
+            # Variables (union to keep selections even if missing this step)
             selected_names = list(st.session_state["vars_widget"])
-            union_options = sorted(set(var_options_available).union(selected_names))
-
-            def labelize(name: str) -> str:
-                return f"{name} (missing in this step)" if name not in var_options_available else name
+            union_options = sorted(set(var_options_avail).union(selected_names))
+            def labelize(n: str) -> str:
+                return f"{n} (missing in this step)" if n not in var_options_avail else n
 
             c_vars, c_nums, c_sec = st.columns([2,2,1])
             with c_vars:
-                st.multiselect(
-                    "Variables",
-                    options=union_options,
-                    key="vars_widget",
-                    format_func=labelize,
-                )
+                st.multiselect("Variables", options=union_options, key="vars_widget", format_func=labelize)
                 sel_vars = list(st.session_state["vars_widget"])
             with c_nums:
                 label_numbers = "Enter nodal NUMBERS (not IDs)" if mode=="Nodal" else "Enter element NUMBERS (not IDs)"
@@ -612,18 +596,18 @@ def render_dump_main(entry: Dict[str, Any]):
 
             if not sel_vars or not numbers_list:
                 st.info("Choose at least one variable and enter a list of numbers to plot.")
-                # Save current state to store before returning
+                # Save current state
                 store[group_key_norm] = {
                     "mode": st.session_state["mode_widget"],
                     "vars": list(st.session_state["vars_widget"]),
                     "nums": st.session_state["nums_widget"],
-                    "sec": st.session_state["sec_widget"],
+                    "sec":  st.session_state["sec_widget"],
                     "comp": store.get(group_key_norm, {}).get("comp", {}),
                 }
                 st.session_state["store"] = store
                 return
 
-            # Components (only for variables present & vector-valued)
+            # Components (only for present & vector-valued)
             rec_comp = store.get(group_key_norm, {}).get("comp", {})
             var_components = {}
             vecs = []
@@ -639,14 +623,14 @@ def render_dump_main(entry: Dict[str, Any]):
                 comp_cols = []
             for (var, comp_max), col in zip(vecs, comp_cols):
                 with col:
-                    ck = f"comp_widget::{var}"  # stable per var label
+                    ck = f"comp_widget::{var}"
                     if ck not in st.session_state:
                         st.session_state[ck] = int(rec_comp.get(var, 0))
                     st.session_state[ck] = max(0, min(int(st.session_state[ck]), comp_max))
                     st.number_input(f"{var}", min_value=0, max_value=comp_max, key=ck, step=1)
                     var_components[var] = int(st.session_state[ck])
 
-            # Map actual numbers -> internal IDs
+            # Map numbers -> internal IDs
             inv = node_inv if mode == "Nodal" else elem_inv
             ids = [inv.get(n) for n in numbers_list]
             missing_nums = [n for n, i in zip(numbers_list, ids) if i is None]
@@ -660,20 +644,20 @@ def render_dump_main(entry: Dict[str, Any]):
                                    xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
                 ft_style(fig, x_title=("Node Number" if mode=="Nodal" else "Element Number"), y_title_left="Value")
                 st.plotly_chart(fig, use_container_width=True)
-                status_df = pd.DataFrame({"requested": numbers_list, "found": [n in used_numbers for n in numbers_list]})
-                st.dataframe(status_df, use_container_width=True)
-                # Save current state to store
+                st.dataframe(pd.DataFrame({"requested": numbers_list, "found": [n in used_numbers for n in numbers_list]}),
+                             use_container_width=True)
+                # Save
                 store[group_key_norm] = {
                     "mode": st.session_state["mode_widget"],
                     "vars": list(st.session_state["vars_widget"]),
                     "nums": st.session_state["nums_widget"],
-                    "sec": st.session_state["sec_widget"],
+                    "sec":  st.session_state["sec_widget"],
                     "comp": {**rec_comp, **{v: var_components.get(v, rec_comp.get(v, 0)) for v in sel_vars}},
                 }
                 st.session_state["store"] = store
                 return
 
-            # Build DataFrame
+            # Build DF
             missing_vars = [v for v in sel_vars if v not in g]
             if missing_vars:
                 st.info(f"Variables missing in this step: {missing_vars}")
@@ -692,28 +676,22 @@ def render_dump_main(entry: Dict[str, Any]):
                     comp = var_components.get(var, rec_comp.get(var, 0))
                     vals = [arr[i, comp] if i is not None and i < arr.shape[0] else np.nan for i in ids]
                     label = f"{var} [comp {comp}]"
-                clean = []
-                for v in vals:
-                    try:
-                        clean.append(float(np.array(v).item()))
-                    except Exception:
-                        clean.append(np.nan)
-                df[label] = clean
+                vals = [float(np.array(v).item()) if v is not None and np.isfinite(v) else np.nan for v in vals]
+                df[label] = vals
                 labels_map[var] = label
 
             # Plot
             sec_choice = st.session_state["sec_widget"]
             sec_present = (sec_choice != "None") and (sec_choice in labels_map)
-
             if sec_choice != "None" and not sec_present:
                 st.info(f"Secondary axis variable '{sec_choice}' is missing in this step and will be ignored.")
 
             if sec_present:
-                sec_label = labels_map.get(sec_choice)
+                sec_label = labels_map[sec_choice]
                 fig = make_subplots(specs=[[{"secondary_y": True}]])
                 prim_labels = []
                 for var in sel_vars:
-                    if var not in labels_map:  # missing
+                    if var not in labels_map:
                         continue
                     col = labels_map[var]
                     if col == sec_label: 
@@ -728,7 +706,7 @@ def render_dump_main(entry: Dict[str, Any]):
                 fig = go.Figure()
                 prim_labels = []
                 for var in sel_vars:
-                    if var not in labels_map:  # missing
+                    if var not in labels_map:
                         continue
                     col = labels_map[var]
                     prim_labels.append(col)
@@ -738,7 +716,7 @@ def render_dump_main(entry: Dict[str, Any]):
 
             st.plotly_chart(fig, use_container_width=True)
 
-            # Export
+            # Exports
             html_bytes = fig.to_html(include_plotlyjs="cdn").encode("utf-8")
             st.download_button("Download plot (HTML)", data=html_bytes, file_name="plot.html", mime="text/html")
             try:
@@ -751,12 +729,12 @@ def render_dump_main(entry: Dict[str, Any]):
             st.dataframe(df, use_container_width=True)
             st.download_button("Download table (CSV)", data=df.to_csv(index=False).encode("utf-8"), file_name="table.csv", mime="text/csv")
 
-            # ---- Save current state to store (single source of truth) ----
+            # Save persistent state
             store[group_key_norm] = {
                 "mode": st.session_state["mode_widget"],
                 "vars": list(st.session_state["vars_widget"]),
                 "nums": st.session_state["nums_widget"],
-                "sec": st.session_state["sec_widget"],
+                "sec":  st.session_state["sec_widget"],
                 "comp": {**rec_comp, **{v: var_components.get(v, rec_comp.get(v, 0)) for v in sel_vars}},
             }
             st.session_state["store"] = store
@@ -764,9 +742,9 @@ def render_dump_main(entry: Dict[str, Any]):
     except Exception as e:
         st.error(f"Dump read error: {e}")
 
-# =========================
-# Render chosen part
-# =========================
+# -----------------------------
+# Render
+# -----------------------------
 if st.session_state.part_choice_radio == "Equations":
     render_equations(active)
 elif st.session_state.part_choice_radio == "Materials":
