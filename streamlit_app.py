@@ -569,7 +569,7 @@ def render_dump_main(entry: Dict[str, Any]):
                 st.session_state[mode_key] = "Nodal"
             st.radio("Variable type", ["Nodal", "Element"], key=mode_key, horizontal=True)
             mode = st.session_state[mode_key]
-            var_options = nodal_vars if mode == "Nodal" else elem_vars
+            var_options_available = nodal_vars if mode == "Nodal" else elem_vars
 
             # Vars / Numbers / Secondary — seed once, never override
             vars_key = f"vars::{group_key_norm}::{mode}"
@@ -582,17 +582,28 @@ def render_dump_main(entry: Dict[str, Any]):
             if sec_key not in st.session_state:
                 st.session_state[sec_key] = "None"
 
+            # ---- Union options to keep your selections even if missing this step ----
+            selected_names = list(st.session_state[vars_key])  # do not filter here
+            union_options = sorted(set(var_options_available).union(selected_names))
+
+            def labelize(name: str) -> str:
+                return f"{name} (missing in this step)" if name not in var_options_available else name
+
             c_vars, c_nums, c_sec = st.columns([2,2,1])
             with c_vars:
-                # rely only on the key; do not pass defaults on each rerun
-                st.multiselect("Variables", var_options, key=vars_key)
-                sel_vars = [v for v in st.session_state[vars_key] if v in var_options]
-                # Do NOT overwrite state here; let Streamlit reconcile across files
+                st.multiselect(
+                    "Variables",
+                    options=union_options,
+                    key=vars_key,
+                    format_func=labelize,  # show "(missing...)" but keep raw value in state
+                )
+                sel_vars = list(st.session_state[vars_key])
             with c_nums:
                 label_numbers = "Enter nodal NUMBERS (not IDs)" if mode=="Nodal" else "Enter element NUMBERS (not IDs)"
                 st.text_input(label_numbers, key=nums_key, placeholder="e.g., 1,2,3-10")
                 numbers_list = parse_int_list(st.session_state[nums_key])
             with c_sec:
+                # Secondary pool = selected names only (even if currently missing)
                 sec_pool = ["None"] + (sel_vars if sel_vars else [])
                 if st.session_state[sec_key] not in sec_pool:
                     st.session_state[sec_key] = "None"
@@ -602,13 +613,14 @@ def render_dump_main(entry: Dict[str, Any]):
                 st.info("Choose at least one variable and enter a list of numbers to plot.")
                 return
 
-            # Components (per normalized group+var) — seed once
+            # Components (per normalized group+var) — only for variables actually present and vector-valued
             var_components = {}
             vecs = []
             for var in sel_vars:
-                arr = np.array(g[var])
-                if arr.ndim >= 2 and arr.shape[1] > 1:
-                    vecs.append((var, arr.shape[1]-1))
+                if var in g:
+                    arr = np.array(g[var])
+                    if arr.ndim >= 2 and arr.shape[1] > 1:
+                        vecs.append((var, arr.shape[1]-1))
             if vecs:
                 st.markdown("**Components**")
                 comp_cols = st.columns(len(vecs))
@@ -626,11 +638,11 @@ def render_dump_main(entry: Dict[str, Any]):
             # Map actual numbers -> internal IDs
             inv = node_inv if mode == "Nodal" else elem_inv
             ids = [inv.get(n) for n in numbers_list]
-            missing = [n for n, i in zip(numbers_list, ids) if i is None]
+            missing_nums = [n for n, i in zip(numbers_list, ids) if i is None]
             ids = [i for i in ids if i is not None]
             used_numbers = [n for n in numbers_list if inv.get(n) is not None]
-            if missing:
-                st.warning(f"Numbers not found and dropped: {missing}")
+            if missing_nums:
+                st.warning(f"Numbers not found and dropped: {missing_nums}")
             if len(ids) == 0 or len(used_numbers) == 0:
                 fig = go.Figure()
                 fig.add_annotation(text="No valid numbers in this step for the current selection",
@@ -642,10 +654,16 @@ def render_dump_main(entry: Dict[str, Any]):
                 return
 
             # Build DataFrame
+            missing_vars = [v for v in sel_vars if v not in g]
+            if missing_vars:
+                st.info(f"Variables missing in this step: {missing_vars}")
+
             first_col_name = "Node Number" if mode=="Nodal" else "Element Number"
             df = pd.DataFrame({first_col_name: used_numbers})
             labels_map = {}
             for var in sel_vars:
+                if var not in g:
+                    continue
                 arr = np.array(g[var])
                 if arr.ndim == 1:
                     vals = [arr[i] if i is not None and i < arr.shape[0] else np.nan for i in ids]
@@ -665,17 +683,24 @@ def render_dump_main(entry: Dict[str, Any]):
 
             # Plot
             sec_choice = st.session_state[sec_key]
-            if sec_choice != "None":
+            sec_present = (sec_choice != "None") and (sec_choice in labels_map)
+
+            if sec_choice != "None" and not sec_present:
+                st.info(f"Secondary axis variable '{sec_choice}' is missing in this step and will be ignored.")
+
+            if sec_present:
                 sec_label = labels_map.get(sec_choice)
                 fig = make_subplots(specs=[[{"secondary_y": True}]])
                 prim_labels = []
                 for var in sel_vars:
+                    if var not in labels_map:  # missing
+                        continue
                     col = labels_map[var]
-                    if col == sec_label: continue
+                    if col == sec_label: 
+                        continue
                     prim_labels.append(col)
                     fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[col], mode="lines+markers", name=col), secondary_y=False)
-                if sec_label is not None:
-                    fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[sec_label], mode="lines+markers", name=f"{sec_label} (right)"), secondary_y=True)
+                fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[sec_label], mode="lines+markers", name=f"{sec_label} (right)"), secondary_y=True)
                 y_left_title = ", ".join(prim_labels) if prim_labels else "Value"
                 y_right_title = sec_label or "Secondary"
                 ft_style(fig, x_title=first_col_name, y_title_left=y_left_title, y_title_right=y_right_title)
@@ -683,6 +708,8 @@ def render_dump_main(entry: Dict[str, Any]):
                 fig = go.Figure()
                 prim_labels = []
                 for var in sel_vars:
+                    if var not in labels_map:  # missing
+                        continue
                     col = labels_map[var]
                     prim_labels.append(col)
                     fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[col], mode="lines+markers", name=col))
