@@ -333,8 +333,10 @@ active = files_sorted[st.session_state.active_index]
 
 
 
-cols = st.columns([3,5,3])
-with cols[2]:
+cols = st.columns([8,3])
+with cols[0]:
+    st.header("ParaGeo plt visualiser")
+with cols[1]:
     #labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']} ({e['id']})" for e in files_sorted]
     labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']}" for e in files_sorted]
     sel = st.selectbox("Jump to file", options=list(range(len(files_sorted))), format_func=lambda i: labels[i], index=st.session_state.active_index, key="jump_file")
