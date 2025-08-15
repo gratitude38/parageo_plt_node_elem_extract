@@ -309,6 +309,8 @@ with st.sidebar:
 # -----------------------------
 # Active file selection
 # -----------------------------
+st.subheader("Spatial distribution (for a fixed time)")
+
 if not st.session_state.files:
     st.info("No files loaded yet. Use the sidebar to drop `.plt` files.")
     st.stop()
@@ -857,7 +859,7 @@ def render_dump_main(entry: Dict[str, Any]):
             ss_default("ts_nums_widget", rec_ts["nums"])
 
             # Union of variables across all files for this group+mode
-            ts_mode = st.radio("Variable type (time series)", ["Nodal","Element"], key="ts_mode_widget", horizontal=True)
+            ts_mode = st.radio("Variable type", ["Nodal","Element"], key="ts_mode_widget", horizontal=True)
             union_vars, comp_max_map = union_variables_across_files(container, subgroup, ts_mode)
             if not union_vars:
                 st.info("No variables available across steps for this selection.")
