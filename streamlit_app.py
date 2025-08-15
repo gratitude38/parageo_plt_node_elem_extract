@@ -33,8 +33,11 @@ ss_default("desired_subgroup_map", {})         # {container -> subgroup}
 ss_default("part_choice_radio", "Dump")
 
 # Persistent store per logical group "container::subgroup" (normalized)
-# store[group] = {"mode": "Nodal"/"Element", "vars":[...], "nums":"1,2,3", "sec":"var/None", "comp":{var:int}}
+# store[group]    = {"mode": "Nodal"/"Element", "vars":[...], "nums":"1,2,3", "sec":"var/None", "comp":{var:int}}
+# store_ts[group] = {"mode": "Nodal"/"Element", "var":"...", "nums":"1,2,3", "comp":{var:int}}
 ss_default("store", {})
+ss_default("store_ts", {})
+
 # Which group is currently bound to the stable widgets
 ss_default("current_group_norm", None)
 
@@ -516,7 +519,92 @@ def render_dump_sidebar(entry: Dict[str, Any]) -> bool:
         return False
 
 # -----------------------------
-# Dump: Main (stable widgets + per-group store)
+# Helpers for Temporal Evolution
+# -----------------------------
+def union_variables_across_files(container: str, subgroup: str, mode: str) -> Tuple[List[str], Dict[str, int]]:
+    """Return (union variable names, max component index per var) for the given group across all files."""
+    names = set()
+    comp_max: Dict[str, int] = {}
+    for entry in files_sorted:
+        path, dump_group = entry["path"], entry["dump_group"]
+        if not dump_group:
+            continue
+        try:
+            with h5py.File(path, "r") as f:
+                root = f[dump_group]
+                if container not in root or subgroup not in root[container]:
+                    continue
+                g = root[container][subgroup]
+                topo_key, node_key, elem_key = find_mapping_keys(g, container)
+                if not (node_key and elem_key):
+                    continue
+                node_numbers = np.array(g[node_key]).reshape(-1)
+                elem_numbers = np.array(g[elem_key]).reshape(-1)
+                exclude = [k for k in [topo_key, node_key, elem_key] if k]
+                nodal_vars, elem_vars = classify_variables(
+                    g, node_count=node_numbers.shape[0], elem_count=elem_numbers.shape[0], exclude=exclude
+                )
+                vars_here = nodal_vars if mode == "Nodal" else elem_vars
+                names.update(vars_here)
+                for var in vars_here:
+                    ds = g[var]
+                    if len(ds.shape) >= 2 and ds.shape[1] > 1:
+                        comp_max[var] = max(comp_max.get(var, 0), ds.shape[1] - 1)
+        except Exception:
+            continue
+    return sorted(names), comp_max
+
+def build_timeseries_dataframe(container: str, subgroup: str, mode: str, var: str, comp: int, numbers: List[int]) -> Tuple[pd.DataFrame, List[str]]:
+    """Extract time series across steps for a single variable and multiple entity numbers."""
+    rows = []
+    notes = []
+    for entry in files_sorted:
+        path, dump_group, t = entry["path"], entry["dump_group"], entry.get("time")
+        if t is None:
+            # fallback if missing time in meta
+            t = np.nan
+        if not dump_group:
+            rows.append((t, {n: np.nan for n in numbers}))
+            continue
+        try:
+            with h5py.File(path, "r") as f:
+                root = f[dump_group]
+                if container not in root or subgroup not in root[container]:
+                    rows.append((t, {n: np.nan for n in numbers})); continue
+                g = root[container][subgroup]
+                topo_key, node_key, elem_key = find_mapping_keys(g, container)
+                if not (node_key and elem_key) or var not in g:
+                    rows.append((t, {n: np.nan for n in numbers})); continue
+                node_numbers = np.array(g[node_key]).astype(int).reshape(-1)
+                elem_numbers = np.array(g[elem_key]).astype(int).reshape(-1)
+                inv = invert_mapping(node_numbers if mode == "Nodal" else elem_numbers)
+                ds = g[var]
+                if len(ds.shape) == 1:
+                    vals = []
+                    for n in numbers:
+                        idx = inv.get(n)
+                        vals.append(float(ds[idx]) if idx is not None and idx < ds.shape[0] else np.nan)
+                else:
+                    c = min(comp, ds.shape[1]-1)
+                    vals = []
+                    for n in numbers:
+                        idx = inv.get(n)
+                        vals.append(float(ds[idx, c]) if idx is not None and idx < ds.shape[0] else np.nan)
+                rows.append((t, dict(zip(numbers, vals))))
+        except Exception as e:
+            notes.append(str(e))
+            rows.append((t, {n: np.nan for n in numbers}))
+    # assemble DF
+    times = [r[0] for r in rows]
+    data = {("Node Number" if mode=="Nodal" else "Element Number"): numbers}
+    # transpose to columns per entity
+    df = pd.DataFrame({"Time": times})
+    for n in numbers:
+        df[f"{'Node' if mode=='Nodal' else 'Elem'} {n}"] = [r[1].get(n, np.nan) for r in rows]
+    return df, notes
+
+# -----------------------------
+# Dump: Main (per-step + temporal)
 # -----------------------------
 def render_dump_main(entry: Dict[str, Any]):
     path = entry["path"]
@@ -553,23 +641,20 @@ def render_dump_main(entry: Dict[str, Any]):
             # ---- normalized group key
             group_key_norm = f"{norm_name(container)}::{norm_name(subgroup)}"
             store: Dict[str, Dict[str, Any]] = st.session_state["store"]
-            rec = store.get(group_key_norm, {"mode":"Nodal","vars":[],"nums":"","sec":"None","comp":{}})
 
-            # ---- ALWAYS seed widgets if missing
-            ss_default("mode_widget", rec["mode"])
-            ss_default("vars_widget", list(rec["vars"]))
-            ss_default("nums_widget", rec["nums"])
-            ss_default("sec_widget",  rec["sec"])
-            ss_default(f"time_toggle::{group_key_norm}", False)
-            ss_default(f"time_xaxis::{group_key_norm}", "Time")   # "Time" or "Step"
+            # ---- ALWAYS seed widgets if missing (per-step view)
+            ss_default("mode_widget", "Nodal")
+            ss_default("vars_widget", [])
+            ss_default("nums_widget", "")
+            ss_default("sec_widget",  "None")
 
             # ---- Load from store when group changes
             if st.session_state["current_group_norm"] != group_key_norm:
+                rec = store.get(group_key_norm, {"mode":"Nodal","vars":[],"nums":"","sec":"None","comp":{}})
                 st.session_state["mode_widget"] = rec["mode"]
                 st.session_state["vars_widget"] = list(rec["vars"])
                 st.session_state["nums_widget"] = rec["nums"]
                 st.session_state["sec_widget"]  = rec["sec"]
-                st.session_state[f"time_toggle::{group_key_norm}"] = False
                 st.session_state["current_group_norm"] = group_key_norm
 
             # Mode
@@ -597,16 +682,6 @@ def render_dump_main(entry: Dict[str, Any]):
                     st.session_state["sec_widget"] = "None"
                 st.selectbox("Secondary y-axis", sec_pool, key="sec_widget")
 
-            # ---- NEW: time-series controls
-            c_ts1, c_ts2 = st.columns([1,1])
-            with c_ts1:
-                st.checkbox("Plot over time (across steps)", key=f"time_toggle::{group_key_norm}")
-            with c_ts2:
-                st.selectbox("X-axis", ["Time", "Step"], key=f"time_xaxis::{group_key_norm}")
-
-            plot_over_time = st.session_state[f"time_toggle::{group_key_norm}"]
-            x_axis_choice = st.session_state[f"time_xaxis::{group_key_norm}"]
-
             if not sel_vars or not numbers_list:
                 st.info("Choose at least one variable and enter a list of numbers to plot.")
                 # Save current state
@@ -618,34 +693,31 @@ def render_dump_main(entry: Dict[str, Any]):
                     "comp": store.get(group_key_norm, {}).get("comp", {}),
                 }
                 st.session_state["store"] = store
-                return
-
-            # Components (only for present & vector-valued)
-            rec_comp = store.get(group_key_norm, {}).get("comp", {})
-            var_components = {}
-            vecs = []
-            for var in sel_vars:
-                if var in g:
-                    arr = np.array(g[var])
-                    if arr.ndim >= 2 and arr.shape[1] > 1:
-                        vecs.append((var, arr.shape[1]-1))
-            if vecs:
-                st.markdown("**Components**")
-                comp_cols = st.columns(len(vecs))
             else:
-                comp_cols = []
-            for (var, comp_max), col in zip(vecs, comp_cols):
-                with col:
-                    ck = f"comp_widget::{var}"
-                    if ck not in st.session_state:
-                        st.session_state[ck] = int(rec_comp.get(var, 0))
-                    st.session_state[ck] = max(0, min(int(st.session_state[ck]), comp_max))
-                    st.number_input(f"{var}", min_value=0, max_value=comp_max, key=ck, step=1)
-                    var_components[var] = int(st.session_state[ck])
+                # Components (only for present & vector-valued)
+                rec_comp = store.get(group_key_norm, {}).get("comp", {})
+                var_components = {}
+                vecs = []
+                for var in sel_vars:
+                    if var in g:
+                        arr = np.array(g[var])
+                        if arr.ndim >= 2 and arr.shape[1] > 1:
+                            vecs.append((var, arr.shape[1]-1))
+                if vecs:
+                    st.markdown("**Components**")
+                    comp_cols = st.columns(len(vecs))
+                else:
+                    comp_cols = []
+                for (var, comp_max), col in zip(vecs, comp_cols):
+                    with col:
+                        ck = f"comp_widget::{var}"
+                        if ck not in st.session_state:
+                            st.session_state[ck] = int(rec_comp.get(var, 0))
+                        st.session_state[ck] = max(0, min(int(st.session_state[ck]), comp_max))
+                        st.number_input(f"{var}", min_value=0, max_value=comp_max, key=ck, step=1)
+                        var_components[var] = int(st.session_state[ck])
 
-            # ---------- Branch: current-step vs time-series ----------
-            if not plot_over_time:
-                # ===== current-step (existing behaviour) =====
+                # Map numbers -> internal IDs
                 inv = node_inv if mode == "Nodal" else elem_inv
                 ids = [inv.get(n) for n in numbers_list]
                 missing_nums = [n for n, i in zip(numbers_list, ids) if i is None]
@@ -653,6 +725,7 @@ def render_dump_main(entry: Dict[str, Any]):
                 used_numbers = [n for n in numbers_list if inv.get(n) is not None]
                 if missing_nums:
                     st.warning(f"Numbers not found and dropped: {missing_nums}")
+
                 if len(ids) == 0 or len(used_numbers) == 0:
                     fig = go.Figure()
                     fig.add_annotation(text="No valid numbers in this step for the current selection",
@@ -661,224 +734,172 @@ def render_dump_main(entry: Dict[str, Any]):
                     st.plotly_chart(fig, use_container_width=True)
                     st.dataframe(pd.DataFrame({"requested": numbers_list, "found": [n in used_numbers for n in numbers_list]}),
                                  use_container_width=True)
-                    return
-
-                first_col_name = "Node Number" if mode=="Nodal" else "Element Number"
-                df = pd.DataFrame({first_col_name: used_numbers})
-                labels_map = {}
-                for var in sel_vars:
-                    if var not in g:
-                        continue
-                    arr = np.array(g[var])
-                    if arr.ndim == 1:
-                        vals = [arr[i] if i is not None and i < arr.shape[0] else np.nan for i in ids]
-                        label = var
-                    else:
-                        comp = var_components.get(var, rec_comp.get(var, 0))
-                        vals = [arr[i, comp] if i is not None and i < arr.shape[0] else np.nan for i in ids]
-                        label = f"{var} [comp {comp}]"
-                    vals = [float(np.array(v).item()) if v is not None and np.isfinite(v) else np.nan for v in vals]
-                    df[label] = vals
-                    labels_map[var] = label
-
-                sec_choice = st.session_state["sec_widget"]
-                sec_present = (sec_choice != "None") and (sec_choice in labels_map)
-                if sec_choice != "None" and not sec_present:
-                    st.info(f"Secondary axis variable '{sec_choice}' is missing in this step and will be ignored.")
-
-                if sec_present:
-                    sec_label = labels_map[sec_choice]
-                    fig = make_subplots(specs=[[{"secondary_y": True}]])
-                    prim_labels = []
-                    for var in sel_vars:
-                        if var not in labels_map:
-                            continue
-                        col = labels_map[var]
-                        if col == sec_label: 
-                            continue
-                        prim_labels.append(col)
-                        fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[col], mode="lines+markers", name=col), secondary_y=False)
-                    fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[sec_label], mode="lines+markers", name=f"{sec_label} (right)"), secondary_y=True)
-                    y_left_title = ", ".join(prim_labels) if prim_labels else "Value"
-                    y_right_title = sec_label or "Secondary"
-                    ft_style(fig, x_title=first_col_name, y_title_left=y_left_title, y_title_right=y_right_title)
                 else:
-                    fig = go.Figure()
-                    prim_labels = []
+                    # Build DF
+                    missing_vars = [v for v in sel_vars if v not in g]
+                    if missing_vars:
+                        st.info(f"Variables missing in this step: {missing_vars}")
+
+                    first_col_name = "Node Number" if mode=="Nodal" else "Element Number"
+                    df = pd.DataFrame({first_col_name: used_numbers})
+                    labels_map = {}
                     for var in sel_vars:
-                        if var not in labels_map:
+                        if var not in g:
                             continue
-                        col = labels_map[var]
-                        prim_labels.append(col)
-                        fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[col], mode="lines+markers", name=col))
-                    y_left_title = ", ".join(prim_labels) if prim_labels else "Value"
-                    ft_style(fig, x_title=first_col_name, y_title_left=y_left_title)
+                        arr = np.array(g[var])
+                        if arr.ndim == 1:
+                            vals = [arr[i] if i is not None and i < arr.shape[0] else np.nan for i in ids]
+                            label = var
+                        else:
+                            comp = var_components.get(var, store.get(group_key_norm, {}).get("comp", {}).get(var, 0))
+                            vals = [arr[i, comp] if i is not None and i < arr.shape[0] else np.nan for i in ids]
+                            label = f"{var} [comp {comp}]"
+                        vals = [float(np.array(v).item()) if v is not None and np.isfinite(v) else np.nan for v in vals]
+                        df[label] = vals
+                        labels_map[var] = label
 
-                st.plotly_chart(fig, use_container_width=True)
-                html_bytes = fig.to_html(include_plotlyjs="cdn").encode("utf-8")
-                st.download_button("Download plot (HTML)", data=html_bytes, file_name="plot.html", mime="text/html")
-                try:
-                    png_bytes = fig.to_image(format="png", scale=2)
-                    st.download_button("Download plot (PNG)", data=png_bytes, file_name="plot.png", mime="image/png")
-                except Exception:
-                    st.caption("PNG export unavailable (kaleido not installed in this runtime).")
-                st.dataframe(df, use_container_width=True)
-                st.download_button("Download table (CSV)", data=df.to_csv(index=False).encode("utf-8"), file_name="table.csv", mime="text/csv")
+                    # Plot
+                    sec_choice = st.session_state["sec_widget"]
+                    sec_present = (sec_choice != "None") and (sec_choice in labels_map)
+                    if sec_choice != "None" and not sec_present:
+                        st.info(f"Secondary axis variable '{sec_choice}' is missing in this step and will be ignored.")
 
-            else:
-                # ===== time-series across steps =====
-                mode_label = "Node" if mode == "Nodal" else "Element"
-                # Pre-build all trace labels (var x number)
-                def trace_label(var: str, n: int, comp_map: Dict[str,int]) -> str:
-                    if var in g and np.array(g[var]).ndim >= 2 and np.array(g[var]).shape[1] > 1:
-                        cidx = comp_map.get(var, rec_comp.get(var, 0))
-                        return f"{var} [comp {cidx}] @ {mode_label} {n}"
-                    elif var in g and np.array(g[var]).ndim == 1:
-                        return f"{var} @ {mode_label} {n}"
+                    if sec_present:
+                        sec_label = labels_map[sec_choice]
+                        fig = make_subplots(specs=[[{"secondary_y": True}]])
+                        prim_labels = []
+                        for var in sel_vars:
+                            if var not in labels_map: continue
+                            col = labels_map[var]
+                            if col == sec_label: 
+                                continue
+                            prim_labels.append(col)
+                            fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[col], mode="lines+markers", name=col), secondary_y=False)
+                        fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[sec_label], mode="lines+markers", name=f"{sec_label} (right)"), secondary_y=True)
+                        y_left_title = ", ".join(prim_labels) if prim_labels else "Value"
+                        y_right_title = sec_label or "Secondary"
+                        ft_style(fig, x_title=first_col_name, y_title_left=y_left_title, y_title_right=y_right_title)
                     else:
-                        # unknown shape in this step → still keep a generic label
-                        return f"{var} @ {mode_label} {n}"
+                        fig = go.Figure()
+                        prim_labels = []
+                        for var in sel_vars:
+                            if var not in labels_map: continue
+                            col = labels_map[var]
+                            prim_labels.append(col)
+                            fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[col], mode="lines+markers", name=col))
+                        y_left_title = ", ".join(prim_labels) if prim_labels else "Value"
+                        ft_style(fig, x_title=first_col_name, y_title_left=y_left_title)
 
-                all_labels = [trace_label(v, n, var_components) for v in sel_vars for n in numbers_list]
-                x_vals: List[float] = []
-                rows: List[Dict[str, float]] = []
-
-                # Iterate all files (ordered)
-                for ent in files_sorted:
+                    st.plotly_chart(fig, use_container_width=True)
+                    html_bytes = fig.to_html(include_plotlyjs="cdn").encode("utf-8")
+                    st.download_button("Download plot (HTML)", data=html_bytes, file_name="plot.html", mime="text/html")
                     try:
-                        with h5py.File(ent["path"], "r") as f2:
-                            dg = ent.get("dump_group")
-                            if not dg or dg not in f2: 
-                                continue
-                            root2 = f2[dg]
-                            if container not in root2: 
-                                continue
-                            if subgroup not in root2[container]: 
-                                continue
-                            g2 = root2[container][subgroup]
-
-                            # x-axis value
-                            x_val = None
-                            if x_axis_choice == "Time" and "Time" in f2[dg]:
-                                try:
-                                    x_val = float(np.array(f2[dg]["Time"][()]).item())
-                                except Exception:
-                                    x_val = None
-                            if x_val is None:
-                                # fallback to Step or index
-                                if "Step" in f2[dg]:
-                                    try:
-                                        x_val = float(np.array(f2[dg]["Step"][()]).item())
-                                    except Exception:
-                                        x_val = None
-                            if x_val is None:
-                                # ultimate fallback = file order index
-                                x_val = float(ent.get("step") or 0)
-                            # build row initialized with NaNs
-                            row = {lab: np.nan for lab in all_labels}
-
-                            # mapping per file
-                            topo2, node_key2, elem_key2 = find_mapping_keys(g2, container_name=container)
-                            if not (node_key2 and elem_key2):
-                                x_vals.append(x_val); rows.append(row); continue
-                            node_nums2 = np.array(g2[node_key2]).astype(int).reshape(-1)
-                            elem_nums2 = np.array(g2[elem_key2]).astype(int).reshape(-1)
-                            inv2 = invert_mapping(node_nums2 if mode=="Nodal" else elem_nums2)
-
-                            # for each var/number get value
-                            for var in sel_vars:
-                                if var not in g2: 
-                                    continue
-                                arr = np.array(g2[var])
-                                # pick component if needed (clamped)
-                                if arr.ndim >= 2 and arr.shape[1] > 1:
-                                    comp_idx = int(var_components.get(var, rec_comp.get(var, 0)))
-                                    comp_idx = max(0, min(comp_idx, arr.shape[1]-1))
-                                else:
-                                    comp_idx = None
-                                for n in numbers_list:
-                                    idx = inv2.get(n)
-                                    if idx is None or idx >= arr.shape[0]:
-                                        continue
-                                    if comp_idx is None:
-                                        val = arr[idx]
-                                    else:
-                                        val = arr[idx, comp_idx]
-                                    try:
-                                        val = float(np.array(val).item())
-                                    except Exception:
-                                        val = np.nan
-                                    lab = trace_label(var, n, {var: comp_idx} if comp_idx is not None else {})
-                                    row[lab] = val
-                            x_vals.append(x_val)
-                            rows.append(row)
+                        png_bytes = fig.to_image(format="png", scale=2)  # needs kaleido
+                        st.download_button("Download plot (PNG)", data=png_bytes, file_name="plot.png", mime="image/png")
                     except Exception:
-                        # ignore file-level errors and keep going
-                        continue
+                        st.caption("PNG export unavailable (kaleido not installed in this runtime).")
+                    st.dataframe(df, use_container_width=True)
+                    st.download_button("Download table (CSV)", data=df.to_csv(index=False).encode("utf-8"), file_name="table.csv", mime="text/csv")
 
-                if not rows:
-                    st.info("No compatible data found across the loaded steps for the current selection.")
-                    return
+                # Save per-step state
+                store[group_key_norm] = {
+                    "mode": st.session_state["mode_widget"],
+                    "vars": list(st.session_state["vars_widget"]),
+                    "nums": st.session_state["nums_widget"],
+                    "sec":  st.session_state["sec_widget"],
+                    "comp": {**store.get(group_key_norm, {}).get("comp", {}),
+                             **{k.split('::')[-1]: int(st.session_state[k]) for k in st.session_state.keys() if k.startswith("comp_widget::")}},
+                }
+                st.session_state["store"] = store
 
-                # Build DataFrame
-                x_name = x_axis_choice
-                df_ts = pd.DataFrame(rows)
-                df_ts.insert(0, x_name, x_vals)
+            # -----------------------------
+            # TEMPORAL EVOLUTION (across steps)
+            # -----------------------------
+            st.divider()
+            st.subheader("Temporal evolution (across steps)")
+            store_ts: Dict[str, Dict[str, Any]] = st.session_state["store_ts"]
+            rec_ts = store_ts.get(group_key_norm, {"mode":"Nodal","var":"", "nums":"", "comp":{}})
 
+            # Always seed TS widgets if missing
+            ss_default("ts_mode_widget", rec_ts["mode"])
+            ss_default("ts_var_widget",  rec_ts["var"])
+            ss_default("ts_nums_widget", rec_ts["nums"])
+
+            # Union of variables across all files for this group+mode
+            ts_mode = st.radio("Variable type (time series)", ["Nodal","Element"], key="ts_mode_widget", horizontal=True)
+            union_vars, comp_max_map = union_variables_across_files(container, subgroup, ts_mode)
+            if not union_vars:
+                st.info("No variables available across steps for this selection.")
+                # Save and return
+                store_ts[group_key_norm] = {
+                    "mode": st.session_state["ts_mode_widget"],
+                    "var":  st.session_state["ts_var_widget"],
+                    "nums": st.session_state["ts_nums_widget"],
+                    "comp": store_ts.get(group_key_norm, {}).get("comp", {}),
+                }
+                st.session_state["store_ts"] = store_ts
+                return
+
+            # If current ts_var not in union, set to first available
+            if st.session_state["ts_var_widget"] not in union_vars:
+                st.session_state["ts_var_widget"] = union_vars[0]
+
+            # Inline controls
+            c_ts1, c_ts2 = st.columns([2,2])
+            with c_ts1:
+                st.selectbox("Variable (single)", options=union_vars, key="ts_var_widget")
+            with c_ts2:
+                label_numbers = "Enter nodal NUMBERS (not IDs) for time series" if ts_mode=="Nodal" else "Enter element NUMBERS (not IDs) for time series"
+                st.text_input(label_numbers, key="ts_nums_widget", placeholder="e.g., 10,12,15-18")
+
+            ts_numbers = parse_int_list(st.session_state["ts_nums_widget"])
+
+            # Component selector if needed
+            sel_var = st.session_state["ts_var_widget"]
+            comp_max = comp_max_map.get(sel_var, 0)
+            if comp_max > 0:
+                ck = f"ts_comp_widget::{sel_var}"
+                if ck not in st.session_state:
+                    st.session_state[ck] = int(store_ts.get(group_key_norm, {}).get("comp", {}).get(sel_var, 0))
+                st.number_input(f"{sel_var} • component", min_value=0, max_value=comp_max, key=ck, step=1)
+                ts_comp = int(st.session_state[ck])
+            else:
+                ts_comp = 0
+
+            if not ts_numbers:
+                st.info("Enter at least one number to plot time series.")
+            else:
+                # Build time series DF
+                df_ts, notes = build_timeseries_dataframe(container, subgroup, ts_mode, sel_var, ts_comp, ts_numbers)
                 # Plot
-                sec_choice = st.session_state["sec_widget"]
-                # variable names present in label start; detect which labels belong to sec variable
-                def is_sec_label(lbl: str) -> bool:
-                    return sec_choice != "None" and lbl.startswith(sec_choice + " ")
-                data_cols = [c for c in df_ts.columns if c != x_name]
-
-                if sec_choice != "None" and not any(is_sec_label(c) for c in data_cols):
-                    st.info(f"Secondary axis variable '{sec_choice}' is missing in these steps and will be ignored.")
-
-                # Build figure
-                if sec_choice != "None" and any(is_sec_label(c) for c in data_cols):
-                    fig = make_subplots(specs=[[{"secondary_y": True}]])
-                    prim_labels = []
-                    for c in data_cols:
-                        if is_sec_label(c): 
-                            continue
-                        prim_labels.append(c)
-                        fig.add_trace(go.Scattergl(x=df_ts[x_name], y=df_ts[c], mode="lines+markers", name=c), secondary_y=False)
-                    # secondary traces
-                    for c in data_cols:
-                        if is_sec_label(c):
-                            fig.add_trace(go.Scattergl(x=df_ts[x_name], y=df_ts[c], mode="lines+markers", name=f"{c} (right)"), secondary_y=True)
-                    y_left = ", ".join(prim_labels) if prim_labels else "Value"
-                    y_right = sec_choice
-                    ft_style(fig, x_title=x_name, y_title_left=y_left, y_title_right=y_right)
-                else:
-                    fig = go.Figure()
-                    for c in data_cols:
-                        fig.add_trace(go.Scattergl(x=df_ts[x_name], y=df_ts[c], mode="lines+markers", name=c))
-                    ft_style(fig, x_title=x_name, y_title_left="Value")
-
-                st.plotly_chart(fig, use_container_width=True)
-                # Exports
-                html_bytes = fig.to_html(include_plotlyjs="cdn").encode("utf-8")
-                st.download_button("Download plot (HTML)", data=html_bytes, file_name="time_series.html", mime="text/html")
+                fig_ts = go.Figure()
+                for n in ts_numbers:
+                    col = f"{'Node' if ts_mode=='Nodal' else 'Elem'} {n}"
+                    fig_ts.add_trace(go.Scattergl(x=df_ts["Time"], y=df_ts[col], mode="lines+markers", name=col))
+                y_title = sel_var if comp_max == 0 else f"{sel_var} [comp {ts_comp}]"
+                ft_style(fig_ts, x_title="Time", y_title_left=y_title)
+                st.plotly_chart(fig_ts, use_container_width=True)
+                html_bytes = fig_ts.to_html(include_plotlyjs="cdn").encode("utf-8")
+                st.download_button("Download time series (HTML)", data=html_bytes, file_name="timeseries.html", mime="text/html")
                 try:
-                    png_bytes = fig.to_image(format="png", scale=2)
-                    st.download_button("Download plot (PNG)", data=png_bytes, file_name="time_series.png", mime="image/png")
+                    png_bytes = fig_ts.to_image(format="png", scale=2)
+                    st.download_button("Download time series (PNG)", data=png_bytes, file_name="timeseries.png", mime="image/png")
                 except Exception:
                     st.caption("PNG export unavailable (kaleido not installed in this runtime).")
-                # Table
                 st.dataframe(df_ts, use_container_width=True)
-                st.download_button("Download table (CSV)", data=df_ts.to_csv(index=False).encode("utf-8"), file_name="time_series.csv", mime="text/csv")
+                st.download_button("Download time series (CSV)", data=df_ts.to_csv(index=False).encode("utf-8"), file_name="timeseries.csv", mime="text/csv")
+                if notes:
+                    st.caption(f"Notes: {set(notes)}")
 
-            # Save persistent state
-            store[group_key_norm] = {
-                "mode": st.session_state["mode_widget"],
-                "vars": list(st.session_state["vars_widget"]),
-                "nums": st.session_state["nums_widget"],
-                "sec":  st.session_state["sec_widget"],
-                "comp": {**rec_comp, **{v: var_components.get(v, rec_comp.get(v, 0)) for v in sel_vars}},
+            # Save TS state
+            store_ts[group_key_norm] = {
+                "mode": st.session_state["ts_mode_widget"],
+                "var":  st.session_state["ts_var_widget"],
+                "nums": st.session_state["ts_nums_widget"],
+                "comp": {**store_ts.get(group_key_norm, {}).get("comp", {}),
+                         **({sel_var: ts_comp} if sel_var else {})},
             }
-            st.session_state["store"] = store
+            st.session_state["store_ts"] = store_ts
 
     except Exception as e:
         st.error(f"Dump read error: {e}")
