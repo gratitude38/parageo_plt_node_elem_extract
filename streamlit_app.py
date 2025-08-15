@@ -176,28 +176,6 @@ def ft_style(fig: go.Figure, x_title: str, y_title_left: str, y_title_right: Opt
         fig.update_yaxes(showgrid=True, gridcolor=grid_color, zeroline=False, linecolor=axis_color, ticks="outside", title_text=y_title_left, secondary_y=False)
         fig.update_yaxes(title_text=y_title_right, secondary_y=True)
 
-def axis_title_from_labels(labels: List[str], fallback: str = "Value") -> str:
-    """Reduce legend labels into a single tidy axis title.
-    - Strips suffixes like ' (right)', ' [comp k]', and ' @ Node ...'
-    - If multiple base names, use the first; if none, fallback.
-    """
-    if not labels:
-        return fallback
-    cleaned = []
-    for s in labels:
-        if not s: 
-            continue
-        x = re.sub(r"\s*\(right\)$", "", s)
-        x = re.sub(r"\s*\[comp.*?\]$", "", x)
-        x = re.sub(r"\s*@\s*Node.*$", "", x)
-        x = re.sub(r"\s*@\s*Elem.*$", "", x)
-        cleaned.append(x.strip())
-    if not cleaned:
-        return fallback
-    # If all the same, use that; otherwise use the first base name
-    base = cleaned[0]
-    return base
-
 def analyze_file(dst_path: str, orig_name: str) -> Dict[str, Any]:
     suffix_step = extract_step_from_filename(orig_name)
     dump_group = None
@@ -309,7 +287,6 @@ with st.sidebar:
 # -----------------------------
 # Active file selection
 # -----------------------------
-
 if not st.session_state.files:
     st.info("No files loaded yet. Use the sidebar to drop `.plt` files.")
     st.stop()
@@ -332,7 +309,6 @@ else:
 active = files_sorted[st.session_state.active_index]
 
 # Top bar
-st.subheader("Spatial distribution (for a fixed time)")
 cols = st.columns([1,1,5,3])
 with cols[0]:
     if st.button("◀ Prev", use_container_width=True, key="prev_btn", disabled=st.session_state.active_index <= 0):
@@ -785,42 +761,33 @@ def render_dump_main(entry: Dict[str, Any]):
                     # Plot
                     sec_choice = st.session_state["sec_widget"]
                     sec_present = (sec_choice != "None") and (sec_choice in labels_map)
-
                     if sec_choice != "None" and not sec_present:
                         st.info(f"Secondary axis variable '{sec_choice}' is missing in this step and will be ignored.")
-        
+
                     if sec_present:
-                        sec_label = labels_map.get(sec_choice)
+                        sec_label = labels_map[sec_choice]
                         fig = make_subplots(specs=[[{"secondary_y": True}]])
                         prim_labels = []
                         for var in sel_vars:
-                            if var not in labels_map:  # missing
-                                continue
+                            if var not in labels_map: continue
                             col = labels_map[var]
                             if col == sec_label: 
                                 continue
                             prim_labels.append(col)
-                            fig.add_trace(
-                                go.Scattergl(x=df[first_col_name], y=df[col], mode="lines+markers", name=col),
-                                secondary_y=False
-                            )
-                        fig.add_trace(
-                            go.Scattergl(x=df[first_col_name], y=df[sec_label], mode="lines+markers", name=f"{sec_label} (right)"),
-                            secondary_y=True
-                        )
-                        y_left_title  = axis_title_from_labels(prim_labels, fallback="Value")
-                        y_right_title = axis_title_from_labels([sec_label], fallback="Secondary")
+                            fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[col], mode="lines+markers", name=col), secondary_y=False)
+                        fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[sec_label], mode="lines+markers", name=f"{sec_label} (right)"), secondary_y=True)
+                        y_left_title = ", ".join(prim_labels) if prim_labels else "Value"
+                        y_right_title = sec_label or "Secondary"
                         ft_style(fig, x_title=first_col_name, y_title_left=y_left_title, y_title_right=y_right_title)
                     else:
                         fig = go.Figure()
                         prim_labels = []
                         for var in sel_vars:
-                            if var not in labels_map:  # missing
-                                continue
+                            if var not in labels_map: continue
                             col = labels_map[var]
                             prim_labels.append(col)
                             fig.add_trace(go.Scattergl(x=df[first_col_name], y=df[col], mode="lines+markers", name=col))
-                        y_left_title = axis_title_from_labels(prim_labels, fallback="Value")
+                        y_left_title = ", ".join(prim_labels) if prim_labels else "Value"
                         ft_style(fig, x_title=first_col_name, y_title_left=y_left_title)
 
                     st.plotly_chart(fig, use_container_width=True)
@@ -859,7 +826,7 @@ def render_dump_main(entry: Dict[str, Any]):
             ss_default("ts_nums_widget", rec_ts["nums"])
 
             # Union of variables across all files for this group+mode
-            ts_mode = st.radio("Variable type", ["Nodal","Element"], key="ts_mode_widget", horizontal=True)
+            ts_mode = st.radio("Variable type (time series)", ["Nodal","Element"], key="ts_mode_widget", horizontal=True)
             union_vars, comp_max_map = union_variables_across_files(container, subgroup, ts_mode)
             if not union_vars:
                 st.info("No variables available across steps for this selection.")
