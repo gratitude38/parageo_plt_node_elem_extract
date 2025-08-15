@@ -335,7 +335,7 @@ active = files_sorted[st.session_state.active_index]
 
 cols = st.columns([8,3])
 with cols[0]:
-    st.header("ParaGeo plt visualiser")
+    st.header("ParaGeo *.plt* visualiser")
 with cols[1]:
     #labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']} ({e['id']})" for e in files_sorted]
     labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']}" for e in files_sorted]
