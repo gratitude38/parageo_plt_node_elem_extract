@@ -309,7 +309,6 @@ with st.sidebar:
 # -----------------------------
 # Active file selection
 # -----------------------------
-st.subheader("Spatial distribution (for a fixed time)")
 
 if not st.session_state.files:
     st.info("No files loaded yet. Use the sidebar to drop `.plt` files.")
@@ -327,6 +326,7 @@ if st.session_state.active_id is not None:
     except StopIteration:
         st.session_state.active_index = 0
 else:
+    st.subheader("Spatial distribution (for a fixed time)")
     st.session_state.active_index = 0
     st.session_state.active_id = files_sorted[0]["id"]
 
