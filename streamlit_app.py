@@ -334,8 +334,6 @@ active = files_sorted[st.session_state.active_index]
 
 
 cols = st.columns([3,5,3])
-with cols[0]:
-    st.caption(f"Dump group: {active.get('dump_group')} | Step {active['step'] if active['step'] is not None else 'NA'} | Time: {active.get('time')} | File: {active.get('name')}")
 with cols[2]:
     #labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']} ({e['id']})" for e in files_sorted]
     labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']}" for e in files_sorted]
@@ -345,13 +343,15 @@ with cols[2]:
         st.session_state.active_id = files_sorted[sel].get("id")
         st.rerun()
 
-cols = st.columns([3,5,1.5,1.5])
-with cols[2]:
+cols = st.columns([8,1.5,1.5])
+with cols[0]:
+    st.caption(f"Dump group: {active.get('dump_group')} | Step {active['step'] if active['step'] is not None else 'NA'} | Time: {active.get('time')} | File: {active.get('name')}")
+with cols[1]:
     if st.button("◀ Prev", use_container_width=True, key="prev_btn", disabled=st.session_state.active_index <= 0):
         st.session_state.active_index = max(0, st.session_state.active_index - 1)
         st.session_state.active_id = files_sorted[st.session_state.active_index].get("id")
         st.rerun()
-with cols[3]:
+with cols[2]:
     if st.button("Next ▶", use_container_width=True, key="next_btn", disabled=st.session_state.active_index >= len(files_sorted)-1):
         st.session_state.active_index = min(len(files_sorted)-1, st.session_state.active_index + 1)
         st.session_state.active_id = files_sorted[st.session_state.active_index].get("id")
