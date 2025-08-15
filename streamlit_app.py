@@ -321,7 +321,8 @@ with cols[2]:
     label = f"Step {active['step'] if active['step'] is not None else 'NA'} — {active['name']}"
     #st.markdown(f"### {label}")
 with cols[3]:
-    labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']} ({e['id']})" for e in files_sorted]
+    #labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']} ({e['id']})" for e in files_sorted]
+    labels = [f"Step {e['step'] if e['step'] is not None else 'NA'} — {e['name']}" for e in files_sorted]
     sel = st.selectbox("Jump to file", options=list(range(len(files_sorted))), format_func=lambda i: labels[i], index=st.session_state.active_index, key="jump_file")
     if sel != st.session_state.active_index:
         st.session_state.active_index = sel
