@@ -631,8 +631,8 @@ def render_dump_main(entry: Dict[str, Any]):
                     st.error("Element mapping missing.")
                     return
                 
-            node_numbers = np.array(g[node_key]).astype(int).reshape(-1)
-            elem_numbers = np.array(g[elem_key]).astype(int).reshape(-1)
+            #node_numbers = np.array(g[node_key]).astype(int).reshape(-1)
+            #elem_numbers = np.array(g[elem_key]).astype(int).reshape(-1)
             node_inv = invert_mapping(node_numbers)
             elem_inv = invert_mapping(elem_numbers)
 
